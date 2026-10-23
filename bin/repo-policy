@@ -1,0 +1,434 @@
+#!/usr/bin/env bash
+# repo-policy: apply / check one strict GitHub policy (ruleset + repo settings) across repos.
+# Requires: bash 3.2+, gh (authenticated), jq. Never prompts when stdin/stdout is not a TTY or CI is set.
+set -uo pipefail
+
+VERSION="1.0.0"
+SCHEMA="repo-policy/v1"
+EX_OK=0; EX_DRIFT=2; EX_API=3; EX_REFUSED=4; EX_USAGE=64
+
+SELF="${BASH_SOURCE[0]}"
+while [ -L "$SELF" ]; do
+  d=$(cd "$(dirname "$SELF")" && pwd); SELF=$(readlink "$SELF")
+  case "$SELF" in /*) ;; *) SELF="$d/$SELF" ;; esac
+done
+ROOT=$(cd "$(dirname "$SELF")/.." && pwd)
+RULESETS_DIR="${REPO_POLICY_RULESETS_DIR:-$ROOT/rulesets}"
+CONFIG_DIR="${REPO_POLICY_CONFIG_DIR:-$ROOT/config}"
+
+help_text() {
+  cat <<'HELP'
+NAME
+  repo-policy - apply or check the shared GitHub repo policy (ruleset + settings)
+
+USAGE
+  repo-policy <command> [<owner/repo> | --all-active] [flags]
+
+COMMANDS
+  apply   Create/update the ruleset and repo settings (idempotent, by ruleset name).
+  check   Compare live state to desired state. Read-only. Exit 2 on drift.
+  list    List the repos a run would target and why others are skipped. Read-only.
+
+FLAGS
+  --all-active      Every non-archived repo owned by the authenticated user, minus config/skip.txt.
+  --dry-run         apply: compute and print changes, perform NO writes (exit 2 if changes pending).
+  --json            Machine output, schema "repo-policy/v1" (see AGENTS.md). Human text goes to stderr only for errors.
+  --with-checks     Add required_status_checks (default contexts: ci, pr-title).
+  --checks CSV      Override contexts for --with-checks (env REPO_POLICY_CHECKS).
+  --signed          Add required_signatures (opt-in; default off).
+  --yes             apply: do not ask for confirmation (required when non-interactive or CI is set).
+  --owner OWNER     Allowed owner (default tyler-jewell). Flag-Seeker is refused regardless.
+  --help [--json]   This text, or a machine-readable description.
+  --version
+
+  Per-repo opt-ins without flags: list repos in config/with-checks.txt and config/signed.txt.
+
+EXIT CODES
+  0   ok / no drift / changes applied
+  2   drift detected (check, or apply --dry-run with pending changes)
+  3   API, auth or dependency error
+  4   refused (owner Flag-Seeker, or owner not allowed)
+  64  usage error
+
+ENVIRONMENT
+  CI=1                       Disables any prompting.
+  REPO_POLICY_CHECKS         Default for --checks.
+  REPO_POLICY_CONFIG_DIR     Directory with skip.txt, with-checks.txt, signed.txt.
+
+EXAMPLES
+  repo-policy check tyler-jewell/mac-studio --json
+  repo-policy apply tyler-jewell/mac-studio --dry-run
+  repo-policy apply --all-active --yes
+  repo-policy apply tyler-jewell/clef-router --with-checks --yes
+  repo-policy list --all-active --json
+HELP
+}
+
+help_json() {
+  jq -n --arg v "$VERSION" --arg s "$SCHEMA" '{
+    name:"repo-policy", version:$v, output_schema:$s,
+    commands:["apply","check","list"],
+    flags:[
+      {name:"--all-active",type:"bool"},{name:"--dry-run",type:"bool"},{name:"--json",type:"bool"},
+      {name:"--with-checks",type:"bool"},{name:"--checks",type:"csv",default:"ci,pr-title"},
+      {name:"--signed",type:"bool"},{name:"--yes",type:"bool"},
+      {name:"--owner",type:"string",default:"tyler-jewell"}],
+    exit_codes:{"0":"ok","2":"drift","3":"api_or_auth_error","4":"refused","64":"usage"},
+    interactive:false}'
+}
+
+die_usage() { echo "repo-policy: $*" >&2; echo "Try: repo-policy --help" >&2; exit $EX_USAGE; }
+lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+CMD=""; TARGET=""; ALL=0; DRY=0; JSON=0; WITH_CHECKS=0; SIGNED=0; YES=0
+OWNER="tyler-jewell"; CHECKS="${REPO_POLICY_CHECKS:-ci,pr-title}"; WANT_HELP=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    apply|check|list) [ -z "$CMD" ] || die_usage "only one command allowed"; CMD="$1" ;;
+    --all-active) ALL=1 ;;
+    --dry-run) DRY=1 ;;
+    --json) JSON=1 ;;
+    --with-checks) WITH_CHECKS=1 ;;
+    --signed) SIGNED=1 ;;
+    --yes|-y) YES=1 ;;
+    --checks) [ $# -ge 2 ] || die_usage "--checks needs a value"; CHECKS="$2"; shift ;;
+    --checks=*) CHECKS="${1#*=}" ;;
+    --owner) [ $# -ge 2 ] || die_usage "--owner needs a value"; OWNER="$2"; shift ;;
+    --owner=*) OWNER="${1#*=}" ;;
+    -h|--help) WANT_HELP=1 ;;
+    --version) echo "repo-policy $VERSION"; exit 0 ;;
+    -*) die_usage "unknown flag: $1" ;;
+    *) [ -z "$TARGET" ] || die_usage "only one repo target allowed"; TARGET="$1" ;;
+  esac
+  shift
+done
+
+if [ $WANT_HELP -eq 1 ]; then
+  if [ $JSON -eq 1 ]; then help_json; else help_text; fi
+  exit 0
+fi
+
+[ -n "$CMD" ] || die_usage "missing command (apply|check|list)"
+if [ "$CMD" = list ] && [ -z "$TARGET" ]; then ALL=1; fi
+if [ -n "$TARGET" ] && [ $ALL -eq 1 ]; then die_usage "give either <owner/repo> or --all-active, not both"; fi
+if [ -z "$TARGET" ] && [ $ALL -eq 0 ]; then die_usage "missing target: <owner/repo> or --all-active"; fi
+if [ -n "$TARGET" ]; then
+  printf '%s' "$TARGET" | grep -Eq '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$' || die_usage "target must look like owner/repo"
+fi
+printf '%s' "$CHECKS" | grep -Eq '^[^,]+(,[^,]+)*$' || die_usage "--checks must be a comma-separated list"
+
+for dep in jq "${GH:-gh}"; do
+  command -v "$dep" >/dev/null 2>&1 || { echo "repo-policy: missing dependency: $dep" >&2; exit $EX_API; }
+done
+
+# Read-only guard: only a real (non dry-run) apply may write.
+RO=1
+if [ "$CMD" = apply ] && [ $DRY -eq 0 ]; then RO=0; fi
+
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/repo-policy.XXXXXX") || exit $EX_API
+trap 'rm -rf "$TMP"' EXIT
+RESULTS="$TMP/results.ndjson"; : > "$RESULTS"
+
+GH_OUT=""; GH_CODE=0
+gh_get() { # GET only. sets GH_OUT, GH_CODE (200 | http status | 0 for non-http failure)
+  GH_OUT=$("${GH:-gh}" api -X GET "$@" 2>"$TMP/err"); local rc=$?
+  if [ $rc -eq 0 ]; then GH_CODE=200; return 0; fi
+  GH_CODE=$(grep -oE 'HTTP [0-9]{3}' "$TMP/err" 2>/dev/null | head -1 | grep -oE '[0-9]{3}')
+  [ -n "$GH_CODE" ] || GH_CODE=0
+  return 1
+}
+gh_write() { # method path json -- refuses outside a real apply
+  if [ $RO -eq 1 ]; then
+    echo "repo-policy: INTERNAL: write attempted in read-only mode ($1 $2)" >&2; exit $EX_API
+  fi
+  GH_OUT=$(printf '%s' "$3" | "${GH:-gh}" api -X "$1" "$2" --input - 2>"$TMP/err"); local rc=$?
+  if [ $rc -eq 0 ]; then GH_CODE=200; return 0; fi
+  GH_CODE=$(grep -oE 'HTTP [0-9]{3}' "$TMP/err" | head -1 | grep -oE '[0-9]{3}')
+  [ -n "$GH_CODE" ] || GH_CODE=0
+  return 1
+}
+errmsg() { head -c 300 "$TMP/err" | tr '\n' ' '; }
+
+in_list() { # file entry (case-insensitive)
+  [ -f "$1" ] || return 1
+  grep -v '^[[:space:]]*#' "$1" | tr -d '[:blank:]' | tr '[:upper:]' '[:lower:]' | grep -Fxq "$(lc "$2")"
+}
+
+# ---------- desired state ----------
+build_ruleset() { # $1 with_checks(0/1) $2 signed(0/1)
+  local j
+  j=$(jq -c '.' "$RULESETS_DIR/default-branch-protection.json") || return 1
+  if [ "$1" = 1 ]; then
+    j=$(jq -c --slurpfile f "$RULESETS_DIR/required-checks.json" --arg c "$CHECKS" '
+      .rules += ($f[0].rules | map(if .type=="required_status_checks"
+        then .parameters.required_status_checks = ($c|split(",")|map({context:.})) else . end))' <<<"$j")
+  fi
+  if [ "$2" = 1 ]; then
+    j=$(jq -c --slurpfile f "$RULESETS_DIR/signed-commits.json" '.rules += $f[0].rules' <<<"$j")
+  fi
+  printf '%s' "$j"
+}
+
+desired_settings() { # $1 private(true/false)
+  jq -cn --argjson priv "$1" '{
+    allow_squash_merge:true, allow_merge_commit:false, allow_rebase_merge:false,
+    squash_merge_commit_title:"PR_TITLE", squash_merge_commit_message:"PR_BODY",
+    delete_branch_on_merge:true, allow_auto_merge:true, allow_update_branch:true,
+    has_wiki:false, has_projects:false}
+    + (if $priv then {} else {web_commit_signoff_required:true} end)'
+}
+
+JQ_NORM='
+def norm: {enforcement, target,
+  include: (.conditions.ref_name.include // [] | sort),
+  exclude: (.conditions.ref_name.exclude // [] | sort),
+  bypass: ((.bypass_actors // []) | map({actor_id,actor_type,bypass_mode}) | sort_by(.actor_id)),
+  rules: ((.rules // []) | map({type, parameters: ((.parameters // {})
+      | (if has("allowed_merge_methods") then .allowed_merge_methods |= sort else . end)
+      | (if has("required_status_checks") then .required_status_checks |= (map(.context)|sort) else . end))})
+    | sort_by(.type))};
+def drift($d;$l): [
+  (["enforcement","target","include","exclude","bypass"][] as $k
+    | if $d[$k] != $l[$k] then {key:$k,desired:$d[$k],live:$l[$k]} else empty end),
+  ((($d.rules|map(.type)) - ($l.rules|map(.type)))[] | {key:("rule:"+.),desired:"present",live:"absent"}),
+  ((($l.rules|map(.type)) - ($d.rules|map(.type)))[] | {key:("rule:"+.),desired:"absent",live:"present"}),
+  ($d.rules[] as $r | ($l.rules[] | select(.type==$r.type)) as $lr
+    | ($r.parameters | to_entries[]) as $e
+    | if $lr.parameters[$e.key] != $e.value
+      then {key:("rule:"+$r.type+"."+$e.key),desired:$e.value,live:$lr.parameters[$e.key]} else empty end)
+];'
+
+# ---------- per-repo result plumbing ----------
+CHK=""
+add_check() { # area status action drift_json message applied(true/false)
+  jq -cn --arg area "$1" --arg status "$2" --arg action "$3" --argjson drift "$4" --arg msg "$5" --argjson applied "$6" \
+    '{area:$area,status:$status,action:$action,applied:$applied,drift:$drift,message:(if $msg=="" then null else $msg end)}' >> "$CHK"
+}
+
+# Handle a "something differs" outcome. $1 area $2 drift_json $3 action_label; callers pass a write thunk name in $4.
+finish_repo() { # repo status reason
+  jq -s --arg repo "$1" --arg st "$2" --arg reason "$3" \
+    '{repo:$repo,status:$st,reason:(if $reason=="" then null else $reason end),checks:.}' "$CHK" >> "$RESULTS"
+}
+skip_repo() { # repo status reason
+  echo '[]' | jq -c --arg repo "$1" --arg st "$2" --arg reason "$3" '{repo:$repo,status:$st,reason:$reason,checks:.}' >> "$RESULTS"
+}
+
+check_settings() { # full repojson
+  local full="$1" rj="$2" priv want live drift keys body
+  priv=$(jq -r '.private' <<<"$rj")
+  want=$(desired_settings "$priv")
+  live=$(jq -c --argjson w "$want" '. as $r | $w | with_entries(.value = $r[.key])' <<<"$rj")
+  drift=$(jq -cn --argjson w "$want" --argjson l "$live" '[$w|to_entries[]|select($l[.key] != .value)|{key,desired:.value,live:$l[.key]}]')
+  if [ "$drift" = "[]" ]; then add_check settings ok none "[]" "" false; return; fi
+  if [ $RO -eq 1 ]; then add_check settings drift patch "$drift" "" false; return; fi
+  body=$(jq -c 'map({(.key):.desired})|add' <<<"$drift")
+  if gh_write PATCH "repos/$full" "$body"; then add_check settings applied patch "$drift" "" true
+  else add_check settings error patch "$drift" "PATCH failed (HTTP $GH_CODE): $(errmsg)" false; fi
+}
+
+check_toggle() { # area, GET path, PUT path, enabled-test (alerts|fixes), full
+  local area="$1" gpath="$2" ppath="$3" kind="$4" enabled=0 drift
+  drift='[{"key":"enabled","desired":true,"live":false}]'
+  if gh_get "$gpath"; then
+    if [ "$kind" = fixes ]; then [ "$(jq -r '.enabled // false' <<<"$GH_OUT" 2>/dev/null)" = true ] && enabled=1
+    else enabled=1; fi
+  elif [ "$GH_CODE" = 404 ]; then enabled=0
+  elif [ "$GH_CODE" = 403 ]; then add_check "$area" unavailable none "[]" "HTTP 403: $(errmsg)" false; return
+  else add_check "$area" error none "[]" "GET failed (HTTP $GH_CODE): $(errmsg)" false; return; fi
+  if [ $enabled -eq 1 ]; then add_check "$area" ok none "[]" "" false; return; fi
+  if [ $RO -eq 1 ]; then add_check "$area" drift enable "$drift" "" false; return; fi
+  if gh_write PUT "$ppath" ""; then add_check "$area" applied enable "$drift" "" true
+  elif [ "$GH_CODE" = 403 ] || [ "$GH_CODE" = 404 ] || [ "$GH_CODE" = 422 ]; then add_check "$area" unavailable none "[]" "HTTP $GH_CODE: $(errmsg)" false
+  else add_check "$area" error enable "$drift" "PUT failed (HTTP $GH_CODE): $(errmsg)" false; fi
+}
+
+check_secret_scanning() { # full repojson
+  local full="$1" rj="$2" ss pp drift body="" areas=""
+  if [ "$(jq -r '.security_and_analysis == null' <<<"$rj")" = true ]; then
+    add_check secret_scanning unavailable none "[]" "security_and_analysis not exposed (private repo without GHAS, or no admin)" false
+    add_check secret_push_protection unavailable none "[]" "security_and_analysis not exposed" false
+    return
+  fi
+  ss=$(jq -r '.security_and_analysis.secret_scanning.status // "absent"' <<<"$rj")
+  pp=$(jq -r '.security_and_analysis.secret_scanning_push_protection.status // "absent"' <<<"$rj")
+  local need_ss=0 need_pp=0 d_ss="[]" d_pp="[]"
+  if [ "$ss" = absent ]; then add_check secret_scanning unavailable none "[]" "not offered for this repo" false
+  elif [ "$ss" != enabled ]; then need_ss=1; d_ss='[{"key":"status","desired":"enabled","live":"disabled"}]'
+  else add_check secret_scanning ok none "[]" "" false; fi
+  if [ "$pp" = absent ]; then add_check secret_push_protection unavailable none "[]" "not offered for this repo" false
+  elif [ "$pp" != enabled ]; then need_pp=1; d_pp='[{"key":"status","desired":"enabled","live":"disabled"}]'
+  else add_check secret_push_protection ok none "[]" "" false; fi
+  [ $need_ss -eq 1 ] || [ $need_pp -eq 1 ] || return
+  if [ $RO -eq 1 ]; then
+    [ $need_ss -eq 1 ] && add_check secret_scanning drift enable "$d_ss" "" false
+    [ $need_pp -eq 1 ] && add_check secret_push_protection drift enable "$d_pp" "" false
+    return
+  fi
+  body=$(jq -cn --argjson a $need_ss --argjson b $need_pp '{security_and_analysis:
+    ((if $a==1 then {secret_scanning:{status:"enabled"}} else {} end)
+    + (if $b==1 then {secret_scanning_push_protection:{status:"enabled"}} else {} end))}')
+  if gh_write PATCH "repos/$full" "$body"; then
+    [ $need_ss -eq 1 ] && add_check secret_scanning applied enable "$d_ss" "" true
+    [ $need_pp -eq 1 ] && add_check secret_push_protection applied enable "$d_pp" "" true
+  elif [ "$GH_CODE" = 403 ] || [ "$GH_CODE" = 404 ] || [ "$GH_CODE" = 422 ]; then
+    [ $need_ss -eq 1 ] && add_check secret_scanning unavailable none "[]" "HTTP $GH_CODE: $(errmsg)" false
+    [ $need_pp -eq 1 ] && add_check secret_push_protection unavailable none "[]" "HTTP $GH_CODE: $(errmsg)" false
+  else
+    [ $need_ss -eq 1 ] && add_check secret_scanning error enable "$d_ss" "PATCH failed (HTTP $GH_CODE)" false
+    [ $need_pp -eq 1 ] && add_check secret_push_protection error enable "$d_pp" "PATCH failed (HTTP $GH_CODE)" false
+  fi
+}
+
+check_ruleset() { # full with_checks signed
+  local full="$1" want name id live drift rid
+  want=$(build_ruleset "$2" "$3") || { add_check ruleset error none "[]" "cannot build desired ruleset" false; return; }
+  name=$(jq -r '.name' <<<"$want")
+  if ! gh_get "repos/$full/rulesets"; then
+    if [ "$GH_CODE" = 403 ] || [ "$GH_CODE" = 404 ]; then
+      add_check ruleset unavailable none "[]" "rulesets unavailable (HTTP $GH_CODE): $(errmsg | head -c 160)" false
+    else add_check ruleset error none "[]" "GET rulesets failed (HTTP $GH_CODE): $(errmsg)" false; fi
+    return
+  fi
+  id=$(jq -r --arg n "$name" '[.[]|select(.name==$n)][0].id // empty' <<<"$GH_OUT")
+  if [ -z "$id" ]; then
+    drift='[{"key":"ruleset","desired":"present","live":"absent"}]'
+    if [ $RO -eq 1 ]; then add_check ruleset drift create "$drift" "" false; return; fi
+    if gh_write POST "repos/$full/rulesets" "$want"; then add_check ruleset applied create "$drift" "" true
+    elif [ "$GH_CODE" = 403 ]; then add_check ruleset unavailable none "[]" "HTTP 403: $(errmsg | head -c 160)" false
+    else add_check ruleset error create "$drift" "POST failed (HTTP $GH_CODE): $(errmsg)" false; fi
+    return
+  fi
+  if ! gh_get "repos/$full/rulesets/$id"; then
+    add_check ruleset error none "[]" "GET ruleset $id failed (HTTP $GH_CODE)" false; return
+  fi
+  live="$GH_OUT"
+  drift=$(jq -cn --argjson d "$want" --argjson l "$live" "$JQ_NORM"' drift(($d|norm);($l|norm))') \
+    || { add_check ruleset error none "[]" "cannot compare ruleset" false; return; }
+  if [ "$drift" = "[]" ]; then add_check ruleset ok none "[]" "" false; return; fi
+  if [ $RO -eq 1 ]; then add_check ruleset drift update "$drift" "" false; return; fi
+  if gh_write PUT "repos/$full/rulesets/$id" "$want"; then add_check ruleset applied update "$drift" "" true
+  else add_check ruleset error update "$drift" "PUT failed (HTTP $GH_CODE): $(errmsg)" false; fi
+}
+
+process_repo() { # full explicit(0/1)
+  local full="$1" explicit="$2" owner name lo ln rj wc sg
+  owner="${full%%/*}"; name="${full#*/}"; lo=$(lc "$owner"); ln=$(lc "$name")
+  if [ "$lo" = "flag-seeker" ] || [ "$ln" = "flagseeker" ] || [ "$ln" = "flag-seeker" ]; then
+    if [ "$explicit" = 1 ]; then skip_repo "$full" refused "exempt: Flag-Seeker is never touched (docs/EXEMPTIONS.md)"
+    else skip_repo "$full" skipped "exempt: Flag-Seeker"; fi
+    return
+  fi
+  if [ "$lo" != "$(lc "$OWNER")" ]; then
+    if [ "$explicit" = 1 ]; then skip_repo "$full" refused "owner '$owner' is not '$OWNER' (override with --owner)"
+    else skip_repo "$full" skipped "owner not $OWNER"; fi
+    return
+  fi
+  if [ "$explicit" = 0 ] && in_list "$CONFIG_DIR/skip.txt" "$full"; then skip_repo "$full" skipped "in config/skip.txt"; return; fi
+  CHK="$TMP/checks.ndjson"; : > "$CHK"
+  if ! gh_get "repos/$full"; then
+    add_check repo error none "[]" "GET repo failed (HTTP $GH_CODE): $(errmsg)" false
+    finish_repo "$full" error ""; return
+  fi
+  rj="$GH_OUT"
+  if [ "$(jq -r '.archived' <<<"$rj")" = true ]; then skip_repo "$full" skipped "archived"; return; fi
+  wc=$WITH_CHECKS; sg=$SIGNED
+  in_list "$CONFIG_DIR/with-checks.txt" "$full" && wc=1
+  in_list "$CONFIG_DIR/signed.txt" "$full" && sg=1
+  check_settings "$full" "$rj"
+  check_ruleset "$full" "$wc" "$sg"
+  check_toggle vulnerability_alerts "repos/$full/vulnerability-alerts" "repos/$full/vulnerability-alerts" alerts
+  check_toggle automated_security_fixes "repos/$full/automated-security-fixes" "repos/$full/automated-security-fixes" fixes
+  check_secret_scanning "$full" "$rj"
+  local st
+  st=$(jq -rs 'if any(.[]; .status=="error") then "error"
+    elif any(.[]; .status=="drift") then "drift"
+    elif any(.[]; .status=="applied") then "changed" else "ok" end' "$CHK")
+  finish_repo "$full" "$st" ""
+}
+
+# ---------- target resolution ----------
+auth_login() {
+  gh_get user || { echo "repo-policy: cannot read authenticated user (HTTP $GH_CODE): $(errmsg)" >&2; exit $EX_API; }
+  jq -r '.login' <<<"$GH_OUT"
+}
+list_owned() { # prints "full<TAB>archived"
+  local out
+  out=$("${GH:-gh}" api -X GET --paginate 'user/repos?affiliation=owner&per_page=100' 2>"$TMP/err") \
+    || { echo "repo-policy: listing repos failed: $(errmsg)" >&2; exit $EX_API; }
+  printf '%s' "$out" | jq -rs --arg login "$LOGIN" 'add // [] | map(select(.owner.login==$login)) | sort_by(.full_name)[] | [.full_name,(.archived|tostring)] | @tsv'
+}
+
+LOGIN=""
+if [ $ALL -eq 1 ]; then LOGIN=$(auth_login) || exit $EX_API; [ -n "$LOGIN" ] || exit $EX_API; fi
+
+if [ "$CMD" = list ]; then
+  : > "$TMP/list.ndjson"
+  list_owned | while IFS="$(printf '\t')" read -r full arch; do
+    ln=$(lc "${full#*/}")
+    if [ "$arch" = true ]; then st=archived; rs="archived"
+    elif [ "$ln" = flagseeker ] || [ "$ln" = flag-seeker ]; then st=skipped; rs="exempt: Flag-Seeker"
+    elif in_list "$CONFIG_DIR/skip.txt" "$full"; then st=skipped; rs="in config/skip.txt"
+    else st=active; rs=""; fi
+    jq -cn --arg r "$full" --arg s "$st" --arg why "$rs" '{repo:$r,status:$s,reason:(if $why=="" then null else $why end)}' >> "$TMP/list.ndjson"
+  done
+  if [ $JSON -eq 1 ]; then
+    jq -s --arg s "$SCHEMA" '{schema:$s,command:"list",exit_code:0,summary:{repos:length,active:(map(select(.status=="active"))|length)},repos:.}' "$TMP/list.ndjson"
+  else
+    jq -r '"\(.status)\t\(.repo)\t\(.reason // "")"' "$TMP/list.ndjson"
+  fi
+  exit 0
+fi
+
+if [ $ALL -eq 1 ]; then
+  TARGETS=$(list_owned | while IFS="$(printf '\t')" read -r full arch; do
+      [ "$arch" = true ] && echo "$full	archived" || echo "$full	live"; done)
+else
+  TARGETS="$TARGET	live"
+fi
+
+# Confirmation (apply, real writes only).
+if [ "$CMD" = apply ] && [ $RO -eq 0 ] && [ $YES -eq 0 ]; then
+  if [ -t 0 ] && [ -t 1 ] && [ -z "${CI:-}" ]; then
+    n=$(printf '%s\n' "$TARGETS" | grep -c .)
+    printf 'Apply policy to %s repo(s)? [y/N] ' "$n" >&2; read -r ans
+    case "$ans" in y|Y|yes) ;; *) echo "aborted" >&2; exit $EX_USAGE ;; esac
+  else
+    echo "repo-policy: apply needs --yes (or --dry-run) when non-interactive" >&2; exit $EX_USAGE
+  fi
+fi
+
+explicit=0; [ -n "$TARGET" ] && explicit=1
+printf '%s\n' "$TARGETS" > "$TMP/targets"
+while IFS="$(printf '\t')" read -r full flag; do
+  [ -n "$full" ] || continue
+  if [ "$flag" = archived ]; then skip_repo "$full" skipped "archived"; continue; fi
+  process_repo "$full" "$explicit"
+done < "$TMP/targets"
+
+# ---------- report ----------
+SUMMARY=$(jq -s '{repos:length,
+  ok:(map(select(.status=="ok" or .status=="changed"))|length),
+  drift:(map(select(.status=="drift"))|length),
+  skipped:(map(select(.status=="skipped"))|length),
+  refused:(map(select(.status=="refused"))|length),
+  errors:(map(select(.status=="error"))|length)}' "$RESULTS")
+errors=$(jq -r .errors <<<"$SUMMARY"); refused=$(jq -r .refused <<<"$SUMMARY"); drifts=$(jq -r .drift <<<"$SUMMARY")
+RC=$EX_OK
+if [ "$errors" -gt 0 ]; then RC=$EX_API
+elif [ "$refused" -gt 0 ]; then RC=$EX_REFUSED
+elif [ "$drifts" -gt 0 ]; then RC=$EX_DRIFT; fi
+
+if [ $JSON -eq 1 ]; then
+  jq -s --arg s "$SCHEMA" --arg c "$CMD" --argjson dry "$([ $RO -eq 1 ] && [ "$CMD" = apply ] && echo true || echo false)" \
+     --argjson rc "$RC" --argjson sum "$SUMMARY" \
+    '{schema:$s,command:$c,dry_run:$dry,exit_code:$rc,summary:$sum,repos:.}' "$RESULTS"
+else
+  jq -r '"[\(.status)] \(.repo)\(if .reason then "  (\(.reason))" else "" end)",
+    (.checks[] | select(.status != "ok") |
+      "    \(.area): \(.status)\(if .message then " - \(.message)" else "" end)",
+      (.drift[]? | "        \(.key): live=\(.live|tojson) desired=\(.desired|tojson)"))' "$RESULTS"
+  jq -r '"summary: \(.repos) repos, \(.ok) ok, \(.drift) drift, \(.skipped) skipped, \(.refused) refused, \(.errors) errors"' <<<"$SUMMARY"
+fi
+exit $RC
