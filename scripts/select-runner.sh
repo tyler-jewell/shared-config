@@ -149,7 +149,9 @@ trusted=0
 for e in $TRUSTED_EVENTS; do [ "$e" = "$EVENT_NAME" ] && trusted=1; done
 [ "$trusted" = 1 ] || fallback untrusted-event
 if [ "$EVENT_NAME" = pull_request ]; then
-  [ -n "$HEAD_REPO" ] && [ "$(lower "$HEAD_REPO")" = "$(lower "$REPO")" ] || fallback fork-pr
+  if [ -z "$HEAD_REPO" ] || [ "$(lower "$HEAD_REPO")" != "$(lower "$REPO")" ]; then
+    fallback fork-pr
+  fi
 fi
 
 # ---- (b) token -------------------------------------------------------------

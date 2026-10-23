@@ -25,7 +25,7 @@ SL="self-hosted,macOS,ARM64,mac-studio"
 # run_sr [VAR=val ...]: defaults = trusted push on same repo with token
 OUT=""; ERR=""; RC=0
 run_sr() {
-  OUT=$(env PATH="$W/bin:$PATH" FAKE_CURL_DIR="$D" GITHUB_OUTPUT="$GO" GITHUB_STEP_SUMMARY="$GS" \
+  OUT=$(env -u GITHUB_ACTIONS PATH="$W/bin:$PATH" FAKE_CURL_DIR="$D" GITHUB_OUTPUT="$GO" GITHUB_STEP_SUMMARY="$GS" \
     SELECT_RUNNER_SLEEP="$W/bin/fakesleep" GH_TOKEN="$SENTINEL" REPO=tyler-jewell/r EVENT_NAME=push \
     API_URL=https://api.example.test "$@" bash "$SR" 2>"$W/err"); RC=$?; ERR=$(cat "$W/err")
 }
@@ -80,7 +80,7 @@ t "runs-on includes all given labels once, plus self-hosted" '[ "$(go runs-on)" 
 newstate; setdefault "$IDLE_BODY"; run_sr LABELS="self-hosted,mac-studio"; t "self-hosted label not duplicated" '[ "$(go runs-on)" = "[\"self-hosted\",\"mac-studio\"]" ]'
 newstate; setdefault "$IDLE_BODY"; run_sr FALLBACK=ubuntu-24.04 GH_TOKEN=; t "custom fallback string" '[ "$(go runs-on)" = "\"ubuntu-24.04\"" ]'
 newstate; run_sr FALLBACK='["self-hosted","linux"]' GH_TOKEN=; t "JSON array fallback passes through" '[ "$(go runs-on)" = "[\"self-hosted\",\"linux\"]" ]'
-newstate; setdefault "$IDLE_BODY"; OUT=$(env PATH="$W/bin:$PATH" FAKE_CURL_DIR="$D" SELECT_RUNNER_SLEEP="$W/bin/fakesleep" GH_TOKEN=$SENTINEL REPO=o/r EVENT_NAME=push API_URL=x bash "$SR" --json 2>"$W/err"); RC=$?
+newstate; setdefault "$IDLE_BODY"; OUT=$(env -u GITHUB_ACTIONS -u GITHUB_OUTPUT -u GITHUB_STEP_SUMMARY PATH="$W/bin:$PATH" FAKE_CURL_DIR="$D" SELECT_RUNNER_SLEEP="$W/bin/fakesleep" GH_TOKEN=$SENTINEL REPO=o/r EVENT_NAME=push API_URL=x bash "$SR" --json 2>"$W/err"); RC=$?
 t "--json: only the JSON line on stdout" '[ $RC -eq 0 ] && [ "$(printf "%s\n" "$OUT" | wc -l | tr -d " ")" = 1 ] && jq -e .selfhosted <<<"$OUT" >/dev/null'
 t "works without GITHUB_OUTPUT/STEP_SUMMARY set" '[ $RC -eq 0 ]'
 
