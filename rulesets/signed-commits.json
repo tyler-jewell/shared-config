@@ -1,0 +1,8 @@
+{
+  "$comment": "Fragment: only the rules array is merged by repo-policy --signed. OPT-IN and off by default: no commit signing is configured yet, so requiring signatures would block every PR until SSH signing is set up. See docs/RULESETS.md.",
+  "rules": [
+    {
+      "type": "required_signatures"
+    }
+  ]
+}

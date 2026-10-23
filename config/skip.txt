@@ -1,0 +1,2 @@
+# One owner/repo per line. Repos listed here are skipped by `repo-policy ... --all-active`.
+# Blank lines and # comments are ignored. Explicit targets ignore this list.

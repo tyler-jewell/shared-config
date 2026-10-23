@@ -1,0 +1,2 @@
+# One owner/repo per line. Repos whose CI reports the required contexts (ci, pr-title).
+# Equivalent to passing --with-checks for just that repo.

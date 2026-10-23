@@ -1,0 +1,2 @@
+# One owner/repo per line. Repos that require signed commits (opt-in; see docs/RULESETS.md).
+# Equivalent to passing --signed for just that repo.

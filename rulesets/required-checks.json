@@ -1,0 +1,16 @@
+{
+  "$comment": "Fragment: only the rules array is merged into default-branch-protection by repo-policy --with-checks. Contexts here are the default; override with --checks or REPO_POLICY_CHECKS. Apply only to repos whose CI actually reports these contexts, or every PR will be blocked forever.",
+  "rules": [
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "strict_required_status_checks_policy": false,
+        "do_not_enforce_on_create": false,
+        "required_status_checks": [
+          { "context": "ci" },
+          { "context": "pr-title" }
+        ]
+      }
+    }
+  ]
+}
