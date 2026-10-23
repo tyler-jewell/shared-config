@@ -1,0 +1,40 @@
+# Reusable: every non-merge, non-bot commit in the PR must carry "Signed-off-by: Name <email>" (git commit -s).
+# Meaningful for public repos (Apache-2.0 + DCO). Skipped on private repos unless enforce-private is true.
+name: dco
+on:
+  workflow_call:
+    inputs:
+      enforce-private:
+        description: Also enforce on private repositories
+        type: boolean
+        default: false
+permissions: {}
+jobs:
+  signoff:
+    name: signoff
+    if: github.event_name == 'pull_request' && (inputs.enforce-private || !github.event.repository.private)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check Signed-off-by trailers
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          bad=0
+          for sha in $(git rev-list --no-merges "${BASE_SHA}..${HEAD_SHA}"); do
+            email="$(git log -1 --format=%ae "${sha}")"
+            case "${email}" in *'[bot]@users.noreply.github.com') continue ;; esac
+            if ! git log -1 --format=%B "${sha}" | grep -Eq '^Signed-off-by: .+ <[^>]+>$'; then
+              echo "::error title=Missing DCO sign-off::${sha} has no Signed-off-by (fix: git rebase --signoff, see DCO.md)"
+              bad=1
+            fi
+          done
+          exit "${bad}"

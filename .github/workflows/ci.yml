@@ -1,0 +1,66 @@
+# Self-test CI for shared-config itself: runs the test suite and exercises the reusable workflows via local refs.
+# Gate jobs `ci` and `pr-title` are plain jobs so the required-status-check contexts are exactly
+# `ci` and `pr-title` (a reusable-workflow job would report as "<job> / <inner job>").
+name: ci
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  title-lint:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/pr-title.yml
+  branch-name:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/branch-name.yml
+  secrets-scan:
+    uses: ./.github/workflows/secrets-scan.yml
+    permissions:
+      contents: read
+  dco:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/dco.yml
+    permissions:
+      contents: read
+  wrangler-warning:
+    uses: ./.github/workflows/wrangler-warning.yml
+    permissions:
+      contents: read
+  agent-dx:
+    uses: ./.github/workflows/agent-dx.yml
+    permissions:
+      contents: read
+
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - run: bash tests/run.sh
+
+  pr-title:
+    if: always()
+    needs: [title-lint]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - env:
+          R: ${{ needs.title-lint.result }}
+        run: '[ "$R" = success ] || [ "$R" = skipped ]'
+  ci:
+    if: always()
+    needs: [tests, branch-name, secrets-scan, dco, wrangler-warning, agent-dx]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for r in $RESULTS; do [ "$r" = success ] || [ "$r" = skipped ] || { echo "failed: $RESULTS"; exit 1; }; done

@@ -1,0 +1,29 @@
+# Reusable: WARN-only. House rule: avoid wrangler; prefer Cloudflare's other tooling. Never fails the build.
+name: wrangler-warning
+on:
+  workflow_call:
+permissions: {}
+jobs:
+  scan:
+    name: scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Look for wrangler
+        run: |
+          set -uo pipefail
+          found=0
+          while IFS= read -r f; do
+            if grep -qi 'wrangler' "${f}" 2>/dev/null; then
+              echo "::warning file=${f}::wrangler referenced here; house rule is to avoid wrangler"; found=1
+            fi
+          done < <(find . -type f \( -name package.json -o -name package-lock.json -o -name pnpm-lock.yaml \
+                   -o -name yarn.lock -o -name bun.lock -o -name bun.lockb -o -name 'wrangler.*' \) \
+                   -not -path '*/node_modules/*' -not -path './.git/*')
+          [ "${found}" -eq 0 ] && echo "no wrangler references"
+          exit 0

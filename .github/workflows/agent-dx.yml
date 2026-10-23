@@ -1,0 +1,22 @@
+# Reusable PLACEHOLDER. Runs the `agent-dx` linter (Agent-DX principles: --json, stable exit codes,
+# no prompts when non-TTY/CI=1, structured --help) once that linter exists and is on PATH.
+# Today it is a documented no-op. Nothing is installed.
+name: agent-dx
+on:
+  workflow_call:
+permissions: {}
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: agent-dx (placeholder)
+        run: |
+          if command -v agent-dx >/dev/null 2>&1; then
+            echo "agent-dx found; running"; agent-dx lint --json
+          else
+            echo "::notice::agent-dx linter not available yet; skipping (placeholder workflow)"
+          fi
