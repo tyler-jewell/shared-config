@@ -1,0 +1,16 @@
+feat/123-add-login
+fix/crash-on-start
+docs/readme
+chore/bump-deps
+refactor/9-split-module
+perf/fast-path
+test/add-fixtures
+build/1-pin-actions
+ci/harden-workflows
+style/format
+revert/456-bad-change
+dependabot/npm_and_yarn/foo-1.2.3
+dependabot/github_actions/actions/checkout-5
+release-please--branches--main
+revert-12-feat-thing
+feat/x

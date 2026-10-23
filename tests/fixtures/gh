@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Fake gh for tests. State dir: $FAKE_GH_DIR. Logs every call to calls.log as "METHOD path".
+# Files: user.json, repos.json, <o>__<r>.repo.json, <o>__<r>.rulesets.json (or .rulesets.403),
+#        <o>__<r>.ruleset.<id>.json, <o>__<r>.vuln (present = enabled), <o>__<r>.fixes.json
+set -u
+d="$FAKE_GH_DIR"; method=GET; path=""; input=0
+[ "${1:-}" = api ] && shift
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X) method="$2"; shift ;;
+    --input) input=1; shift ;;
+    --paginate) ;;
+    -*) ;;
+    *) path="$1" ;;
+  esac
+  shift
+done
+echo "$method $path" >> "$d/calls.log"
+fail() { echo "{\"message\":\"$2\"}"; echo "gh: $2 (HTTP $1)" >&2; exit 1; }
+if [ "$method" != GET ]; then
+  body=""; [ $input -eq 1 ] && body=$(cat)
+  mkdir -p "$d/writes"; n=$(ls "$d/writes" | wc -l | tr -d ' ')
+  printf '%s %s\n%s\n' "$method" "$path" "$body" > "$d/writes/$n"
+  [ -f "$d/write.fail" ] && fail 422 "Validation Failed"
+  echo '{}'; exit 0
+fi
+case "$path" in
+  user) cat "$d/user.json" ;;
+  user/repos*) cat "$d/repos.json" ;;
+  repos/*/*/rulesets/*) k=${path#repos/}; o=${k%%/*}; r=${k#*/}; r=${r%%/*}; id=${path##*/}
+      f="$d/${o}__${r}.ruleset.$id.json"; [ -f "$f" ] && cat "$f" || fail 404 "Not Found" ;;
+  repos/*/*/rulesets) k=${path#repos/}; o=${k%%/*}; r=${k#*/}; r=${r%%/*}
+      [ -f "$d/${o}__${r}.rulesets.403" ] && fail 403 "Upgrade to GitHub Pro or make this repository public to enable this feature."
+      cat "$d/${o}__${r}.rulesets.json" ;;
+  repos/*/*/vulnerability-alerts) k=${path#repos/}; o=${k%%/*}; r=${k#*/}; r=${r%%/*}
+      [ -f "$d/${o}__${r}.vuln" ] && exit 0 || fail 404 "Not Found" ;;
+  repos/*/*/automated-security-fixes) k=${path#repos/}; o=${k%%/*}; r=${k#*/}; r=${r%%/*}
+      f="$d/${o}__${r}.fixes.json"; [ -f "$f" ] && cat "$f" || fail 404 "Not Found" ;;
+  repos/*/*) k=${path#repos/}; o=${k%%/*}; r=${k#*/}
+      f="$d/${o}__${r}.repo.json"; [ -f "$f" ] && cat "$f" || fail 404 "Not Found" ;;
+  *) fail 404 "Not Found" ;;
+esac

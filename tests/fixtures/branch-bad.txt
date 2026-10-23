@@ -1,0 +1,18 @@
+main
+master
+feature/add-login
+feat/Add-Login
+feat/add_login
+feat/
+feat/-x
+feat/x-
+feat/a--b
+feat
+add-login
+Feat/x
+wip/foo
+hotfix/1
+fix/has.dot
+fix/a/b
+feat/space here
+users/tyler/feat
