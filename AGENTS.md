@@ -48,3 +48,14 @@ Precedence when mixed: 3, then 4, then 2.
 - Never target `Flag-Seeker`; the tool refuses.
 - Run `check --json` first; `apply --dry-run --json` before `apply --yes`.
 - Secrets: never commit; use 1Password `op://` references. Tests: `bash tests/run.sh`.
+
+## `scripts/select-runner.sh` (runner picker)
+
+Env-only inputs (never flags for secrets): `GH_TOKEN REPO EVENT_NAME HEAD_REPO LABELS FALLBACK PREFER_QUEUE TIMEOUT RETRIES API_URL`. Flags: `--json --help --version`. No prompts.
+
+| Code | Meaning |
+|---|---|
+| 0 | decision made (including every fallback); API/network errors never exit non-zero |
+| 64 | invalid usage/env (fallback is still written to `$GITHUB_OUTPUT`) |
+
+Stdout: a human line, then one JSON line `{"schema":"select-runner/v1","selfhosted":bool,"runs_on":...,"reason":"slug","event","repo","online","idle","busy","exit_code"}`. `$GITHUB_OUTPUT` gets `runs-on=<json>`, `reason=`, `selfhosted=`. Reasons: see [docs/RUNNERS.md](docs/RUNNERS.md). The token is never printed. Tests: `bash tests/test_select_runner.sh`.

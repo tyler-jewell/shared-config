@@ -43,3 +43,7 @@ Breaking change: add `!` (`feat(api)!: drop v1`) and a `BREAKING CHANGE:` paragr
 ## New repo
 
 Copy `templates/*` (or rely on the `tyler-jewell/.github` community-health repo), add `templates/ci-caller.yml` as `.github/workflows/ci.yml`, then `bin/repo-policy apply tyler-jewell/<repo> --yes`.
+
+## Runners
+
+CI prefers the self-hosted Mac Studio runner and falls back to `ubuntu-latest` through the `pick` job (`select-runner.yml`). Fork PRs and untrusted events never reach the Studio. Setup, security model and troubleshooting: [RUNNERS](RUNNERS.md). Needs the repo secret `RUNNER_STATUS_TOKEN`.

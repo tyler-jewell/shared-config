@@ -1,0 +1,5 @@
+# actionlint's bundled schema predates the documented job.workflow_sha property.
+paths:
+  .github/workflows/select-runner.yml:
+    ignore:
+      - 'property "workflow_sha" is not defined in object type'

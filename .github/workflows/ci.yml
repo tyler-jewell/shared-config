@@ -9,7 +9,18 @@ on:
     branches: [main]
 permissions:
   contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
+  # Picker: prefers the self-hosted Mac Studio when online+idle and the event is trusted (same-repo),
+  # else ubuntu-latest. Never fails the pipeline (see docs/RUNNERS.md).
+  pick:
+    uses: ./.github/workflows/select-runner.yml
+    permissions:
+      contents: read
+    secrets:
+      runner-status-token: ${{ secrets.RUNNER_STATUS_TOKEN }}
   title-lint:
     if: github.event_name == 'pull_request'
     uses: ./.github/workflows/pr-title.yml
@@ -34,7 +45,23 @@ jobs:
     permissions:
       contents: read
 
+  # Primary test job: runs where the picker says (Studio, or ubuntu-latest as fallback).
   tests:
+    needs: pick
+    runs-on: ${{ fromJSON(needs.pick.outputs.runs-on) }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - run: bash tests/run.sh
+  # Linux portability is always proven exactly once: this extra job runs only when the primary
+  # job went to the Studio (when the picker chose ubuntu-latest, `tests` already is the Linux run).
+  tests-linux:
+    needs: pick
+    if: needs.pick.outputs.selfhosted == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -56,7 +83,7 @@ jobs:
         run: '[ "$R" = success ] || [ "$R" = skipped ]'
   ci:
     if: always()
-    needs: [tests, branch-name, secrets-scan, dco, wrangler-warning, agent-dx]
+    needs: [pick, tests, tests-linux, branch-name, secrets-scan, dco, wrangler-warning, agent-dx]
     runs-on: ubuntu-latest
     permissions: {}
     steps:

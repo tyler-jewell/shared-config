@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Fake curl for select-runner tests. State dir: $FAKE_CURL_DIR.
+# Per call N (1-based, counted in count file), response is chosen from:
+#   resp.N.{code,body,hdr}  >  page.P.body (P from ?page=)  >  default.{code,body,hdr}
+# code: HTTP status, or "curl:<exit>" to simulate a transport failure (28 = timeout).
+# Logs "<url> auth=<yes|no>" to calls.log; the Authorization config is read from stdin (-K -).
+set -u
+d="$FAKE_CURL_DIR"; hdr=""; out=""; url=""; cfg=0; wfmt=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -D) hdr="$2"; shift ;;
+    -o) out="$2"; shift ;;
+    -w) wfmt="$2"; shift ;;
+    -K) cfg=1; shift ;;
+    --max-time | -H | -A) shift ;;
+    -*) ;;
+    *) url="$1" ;;
+  esac
+  shift
+done
+auth=no
+if [ "$cfg" = 1 ]; then
+  conf=$(cat)
+  case "$conf" in *"Authorization: Bearer "*) auth=yes ;; esac
+  printf '%s' "$conf" > "$d/last.config"
+fi
+n=$(( $(cat "$d/count" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$d/count"
+echo "$url auth=$auth" >> "$d/calls.log"
+page=$(printf '%s' "$url" | sed -n 's/.*[?&]page=\([0-9]*\).*/\1/p')
+pick() { # pick <ext> -> file path
+  local ext="$1"
+  if [ -e "$d/resp.$n.$ext" ]; then echo "$d/resp.$n.$ext"
+  elif [ "$ext" = body ] && [ -e "$d/page.$page.body" ]; then echo "$d/page.$page.body"
+  else echo "$d/default.$ext"; fi
+}
+code=$(cat "$(pick code)" 2>/dev/null || echo 200)
+case "$code" in curl:*) exit "${code#curl:}" ;; esac
+[ -e "$(pick hdr)" ] && cat "$(pick hdr)" > "$hdr"
+[ -e "$(pick body)" ] && cat "$(pick body)" > "$out"
+[ -n "$wfmt" ] && printf '%s' "$code"
+exit 0
