@@ -13,14 +13,14 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  # Picker: prefers the self-hosted Mac Studio when online+idle and the event is trusted (same-repo),
-  # else ubuntu-latest. Never fails the pipeline (see docs/RUNNERS.md).
+  # Picker: RUNNER_MODE=studio sends trusted (same-repo) events to the self-hosted Mac Studio; default
+  # hosted = ubuntu-latest. Fork PRs/untrusted events always hosted. Never fails the pipeline (see docs/RUNNERS.md).
   pick:
     uses: ./.github/workflows/select-runner.yml
     permissions:
       contents: read
-    secrets:
-      runner-status-token: ${{ secrets.RUNNER_STATUS_TOKEN }}
+    with:
+      mode: ${{ vars.RUNNER_MODE }}   # hosted (default) | studio | auto; flip with bin/runner-mode
   title-lint:
     if: github.event_name == 'pull_request'
     uses: ./.github/workflows/pr-title.yml

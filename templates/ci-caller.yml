@@ -2,9 +2,10 @@
 # Gate jobs `ci` and `pr-title` are plain jobs so the required-status-check contexts are exactly
 # `ci` and `pr-title` (a reusable-workflow job would report as "<job> / <inner job>").
 # Add your own build/test jobs to the `needs:` of the `ci` gate.
-# `pick` chooses runs-on for your jobs: the self-hosted `mac-studio` runner when it is online and idle
-# and the event is trusted (same-repo), else ubuntu-latest. See docs/RUNNERS.md. Needs the repo secret
-# RUNNER_STATUS_TOKEN (without it the picker simply falls back to ubuntu-latest).
+# `pick` chooses runs-on for your jobs from the repo variable RUNNER_MODE (no token, no secret):
+# hosted (default when unset) = ubuntu-latest; studio = the self-hosted `mac-studio` runner for trusted
+# same-repo events (fork PRs/untrusted events are always hosted). Flip: bin/runner-mode set <mode> <repo>.
+# Linux runner: `with: {os: linux}` or the `linux`/`macos` outputs in a matrix. See docs/RUNNERS.md.
 name: ci
 on:
   pull_request:
@@ -18,8 +19,8 @@ jobs:
     uses: tyler-jewell/shared-config/.github/workflows/select-runner.yml@v1
     permissions:
       contents: read
-    secrets:
-      runner-status-token: ${{ secrets.RUNNER_STATUS_TOKEN }}
+    with:
+      mode: ${{ vars.RUNNER_MODE }}   # hosted (default) | studio | auto; flip with bin/runner-mode
   title-lint:
     if: github.event_name == 'pull_request'
     uses: tyler-jewell/shared-config/.github/workflows/pr-title.yml@v1

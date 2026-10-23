@@ -22,11 +22,11 @@ rn() { jq -nc --arg n "$1" --arg s "$2" --argjson b "$3" --arg l "$4" '{id:1,nam
 body() { printf '%s\n' "$@" | jq -sc '{total_count:length,runners:.}'; }
 setdefault() { printf '%s\n' "$1" > "$D/default.body"; }
 SL="self-hosted,macOS,ARM64,mac-studio"
-# run_sr [VAR=val ...]: defaults = trusted push on same repo with token
+# run_sr [VAR=val ...]: defaults = trusted push on same repo with token, MODE=auto (the product default is hosted)
 OUT=""; ERR=""; RC=0
 run_sr() {
   OUT=$(env -u GITHUB_ACTIONS PATH="$W/bin:$PATH" FAKE_CURL_DIR="$D" GITHUB_OUTPUT="$GO" GITHUB_STEP_SUMMARY="$GS" \
-    SELECT_RUNNER_SLEEP="$W/bin/fakesleep" GH_TOKEN="$SENTINEL" REPO=tyler-jewell/r EVENT_NAME=push \
+    SELECT_RUNNER_SLEEP="$W/bin/fakesleep" GH_TOKEN="$SENTINEL" REPO=tyler-jewell/r EVENT_NAME=push MODE=auto \
     API_URL=https://api.example.test "$@" bash "$SR" 2>"$W/err"); RC=$?; ERR=$(cat "$W/err")
 }
 last() { printf '%s\n' "$OUT" | tail -1; }
@@ -69,7 +69,7 @@ newstate; setdefault "$IDLE_BODY"; run_sr GH_TOKEN=; decide no-token false; t "e
 section "decision and output format"
 newstate; setdefault "$IDLE_BODY"; run_sr
 t "runs-on in GITHUB_OUTPUT is compact JSON array" '[ "$(go runs-on)" = "[\"self-hosted\",\"mac-studio\"]" ]'
-t "GITHUB_OUTPUT has exactly 3 key=value lines" '[ "$(wc -l < "$GO" | tr -d " ")" = 3 ] && ! grep -qv "^[a-z-]*=" "$GO"'
+t "GITHUB_OUTPUT has exactly 6 key=value lines" '[ "$(wc -l < "$GO" | tr -d " ")" = 6 ] && ! grep -qv "^[a-z-]*=" "$GO"'
 t "stdout: human line then one-line JSON summary" '[ "$(printf "%s\n" "$OUT" | wc -l | tr -d " ")" = 2 ] && printf "%s\n" "$OUT" | head -1 | grep -q "^select-runner: runs-on=" && [ "$(j .schema)" = select-runner/v1 ]'
 t "summary counts" '[ "$(j .online)" = 1 ] && [ "$(j .idle)" = 1 ] && [ "$(j .busy)" = 0 ]'
 t "GITHUB_STEP_SUMMARY table written" 'grep -q "idle-runner" "$GS" && grep -q "^| runs-on" "$GS"'
@@ -80,7 +80,7 @@ t "runs-on includes all given labels once, plus self-hosted" '[ "$(go runs-on)" 
 newstate; setdefault "$IDLE_BODY"; run_sr LABELS="self-hosted,mac-studio"; t "self-hosted label not duplicated" '[ "$(go runs-on)" = "[\"self-hosted\",\"mac-studio\"]" ]'
 newstate; setdefault "$IDLE_BODY"; run_sr FALLBACK=ubuntu-24.04 GH_TOKEN=; t "custom fallback string" '[ "$(go runs-on)" = "\"ubuntu-24.04\"" ]'
 newstate; run_sr FALLBACK='["self-hosted","linux"]' GH_TOKEN=; t "JSON array fallback passes through" '[ "$(go runs-on)" = "[\"self-hosted\",\"linux\"]" ]'
-newstate; setdefault "$IDLE_BODY"; OUT=$(env -u GITHUB_ACTIONS -u GITHUB_OUTPUT -u GITHUB_STEP_SUMMARY PATH="$W/bin:$PATH" FAKE_CURL_DIR="$D" SELECT_RUNNER_SLEEP="$W/bin/fakesleep" GH_TOKEN=$SENTINEL REPO=o/r EVENT_NAME=push API_URL=x bash "$SR" --json 2>"$W/err"); RC=$?
+newstate; setdefault "$IDLE_BODY"; OUT=$(env -u GITHUB_ACTIONS -u GITHUB_OUTPUT -u GITHUB_STEP_SUMMARY PATH="$W/bin:$PATH" FAKE_CURL_DIR="$D" SELECT_RUNNER_SLEEP="$W/bin/fakesleep" GH_TOKEN=$SENTINEL REPO=o/r EVENT_NAME=push MODE=auto API_URL=x bash "$SR" --json 2>"$W/err"); RC=$?
 t "--json: only the JSON line on stdout" '[ $RC -eq 0 ] && [ "$(printf "%s\n" "$OUT" | wc -l | tr -d " ")" = 1 ] && jq -e .selfhosted <<<"$OUT" >/dev/null'
 t "works without GITHUB_OUTPUT/STEP_SUMMARY set" '[ $RC -eq 0 ]'
 
@@ -128,6 +128,47 @@ newstate; echo '[1,2]' > "$D/default.body"; run_sr; decide bad-json false
 newstate; : > "$D/default.body"; run_sr; decide bad-json false
 newstate; echo '{"runners":[null,1,"x",{"status":"online"}]}' > "$D/default.body"; run_sr; decide no-runner-online false; t "odd runner entries tolerated" '[ $RC -eq 0 ]'
 
+section "mode switch (token-free), os labels, outputs"
+SLX="self-hosted,Linux,mac-studio-linux"
+mk() { rm -rf "$D"; mkdir -p "$D"; : > "$GO"; : > "$GS"; : > "$W/sleeps.log"; }
+# studio: trusted events go to the Studio with no API call and no token
+mk; run_sr MODE=studio GH_TOKEN=; decide mode-studio true
+t "studio: no API call, no token needed" '[ ! -e "$D/calls.log" ] && [ "$(go runs-on)" = "[\"self-hosted\",\"mac-studio\"]" ]'
+t "studio: macos+linux outputs both self-hosted labels" '[ "$(go macos)" = "[\"self-hosted\",\"mac-studio\"]" ] && [ "$(go linux)" = "[\"self-hosted\",\"mac-studio-linux\"]" ] && [ "$(go mode)" = studio ]'
+for ev in push schedule workflow_dispatch merge_group; do mk; run_sr MODE=studio EVENT_NAME=$ev; decide mode-studio true; done
+mk; run_sr MODE=studio EVENT_NAME=pull_request HEAD_REPO=tyler-jewell/r; decide mode-studio true
+mk; run_sr MODE=STUDIO; decide mode-studio true
+mk; run_sr MODE=studio EVENT_NAME=pull_request HEAD_REPO=evil/fork; decide fork-pr false
+t "studio: fork PR goes hosted for BOTH oses" '[ "$(go macos)" = "\"ubuntu-latest\"" ] && [ "$(go linux)" = "\"ubuntu-latest\"" ] && [ ! -e "$D/calls.log" ]'
+mk; run_sr MODE=studio EVENT_NAME=pull_request HEAD_REPO=; decide fork-pr false
+for ev in issue_comment pull_request_target workflow_run issues release; do mk; run_sr MODE=studio EVENT_NAME=$ev; decide untrusted-event false; t "studio+$ev: hosted, both oses" '[ "$(go macos)" = "\"ubuntu-latest\"" ] && [ "$(go linux)" = "\"ubuntu-latest\"" ]'; done
+# hosted (default): never self-hosted, no API call
+mk; run_sr MODE=hosted; decide mode-hosted false; t "hosted: no API call, fallback JSON string" '[ ! -e "$D/calls.log" ] && [ "$(go runs-on)" = "\"ubuntu-latest\"" ]'
+mk; run_sr MODE=; decide mode-hosted false
+t "unset MODE defaults to hosted" 'OUT=$(env -u MODE PATH="$W/bin:$PATH" REPO=o/r EVENT_NAME=push GITHUB_OUTPUT="$GO" bash "$SR"); [ "$(j .reason)" = mode-hosted ] && [ "$(j .selfhosted)" = false ]'
+mk; run_sr MODE=hosted FALLBACK=ubuntu-24.04; t "hosted honours FALLBACK" '[ "$(go runs-on)" = "\"ubuntu-24.04\"" ]'
+mk; run_sr MODE=bogus; t "invalid MODE => 64, hosted fallback emitted" '[ $RC -eq 64 ] && [ "$(go selfhosted)" = false ] && [ "$(go reason)" = invalid-mode ]'
+mk; run_sr OS_TARGET=windows; t "invalid OS_TARGET => 64" '[ $RC -eq 64 ] && [ "$(go reason)" = invalid-os ]'
+# os target
+mk; run_sr MODE=studio OS_TARGET=linux; decide mode-studio true; t "os=linux: runs-on is the Lima label" '[ "$(go runs-on)" = "[\"self-hosted\",\"mac-studio-linux\"]" ]'
+mk; run_sr MODE=studio OS_TARGET=macos; t "os=macos explicit" '[ "$(go runs-on)" = "[\"self-hosted\",\"mac-studio\"]" ]'
+mk; run_sr MODE=studio OS_TARGET=LINUX; t "os is case-insensitive" '[ "$(go runs-on)" = "[\"self-hosted\",\"mac-studio-linux\"]" ]'
+mk; run_sr MODE=hosted OS_TARGET=linux; t "os=linux hosted: fallback is ubuntu-latest" '[ "$(go runs-on)" = "\"ubuntu-latest\"" ]'
+mk; run_sr MODE=studio LABELS="macOS,mac-studio"; t "LABELS overrides OS_TARGET labels only" '[ "$(go runs-on)" = "[\"self-hosted\",\"macOS\",\"mac-studio\"]" ] && [ "$(go linux)" = "[\"self-hosted\",\"mac-studio-linux\"]" ]'
+mk; run_sr MODE=studio OS_TARGET=linux LABELS="mac-studio-linux,gpu"; t "LABELS override with os=linux" '[ "$(go runs-on)" = "[\"self-hosted\",\"mac-studio-linux\",\"gpu\"]" ] && [ "$(go macos)" = "[\"self-hosted\",\"mac-studio\"]" ]'
+# auto evaluates each OS label set from one API call
+BOTH=$(body "$(rn mac online false "$SL")" "$(rn lima online true "$SLX")")
+mk; setdefault "$BOTH"; run_sr MODE=auto; decide idle-runner true; t "auto macos target: one API call; macos self, linux fallback (busy)" '[ "$(calls)" = 1 ] && [ "$(go macos)" = "[\"self-hosted\",\"mac-studio\"]" ] && [ "$(go linux)" = "\"ubuntu-latest\"" ]'
+mk; setdefault "$BOTH"; run_sr MODE=auto OS_TARGET=linux; decide all-busy false; t "auto linux target reports linux decision" '[ "$(go runs-on)" = "\"ubuntu-latest\"" ] && [ "$(go macos)" = "[\"self-hosted\",\"mac-studio\"]" ]'
+mk; setdefault "$BOTH"; run_sr MODE=auto OS_TARGET=linux PREFER_QUEUE=true; decide queue true
+mk; setdefault "$IDLE_BODY"; run_sr MODE=auto OS_TARGET=linux; decide no-runner-online false
+mk; run_sr MODE=auto GH_TOKEN=; decide no-token false
+mk; run_sr MODE=auto EVENT_NAME=pull_request HEAD_REPO=x/y; decide fork-pr false
+mk; echo 500 > "$D/default.code"; run_sr MODE=auto; decide api-500 false
+t "summary JSON carries mode/os/macos/linux" 'mk; setdefault "$BOTH"; run_sr MODE=auto; [ "$(j .mode)" = auto ] && [ "$(j .os)" = macos ] && [ "$(last | jq -c .macos)" = "[\"self-hosted\",\"mac-studio\"]" ] && [ "$(j .linux)" = ubuntu-latest ]'
+t "sentinel absent in studio mode output" 'mk; run_sr MODE=studio; ! grep -q "$SENTINEL" <<<"$OUT$ERR" && ! grep -q "$SENTINEL" "$GO"'
+t "backwards compat: old-style call (auto + default labels) still yields runs-on/reason/selfhosted" 'mk; setdefault "$IDLE_BODY"; run_sr MODE=auto; [ "$(go runs-on)" = "[\"self-hosted\",\"mac-studio\"]" ] && [ "$(go reason)" = idle-runner ] && [ "$(go selfhosted)" = true ]'
+
 section "token never leaks"
 for s in "ok" "401" "500" "429" "badjson" "forkpr"; do
   newstate
@@ -144,6 +185,14 @@ done
 newstate; setdefault "$IDLE_BODY"; run_sr; t "token only reached the fake curl via stdin config" 'grep -q "$SENTINEL" "$D/last.config" && ! grep -q "$SENTINEL" "$D/calls.log"'
 newstate; setdefault "$IDLE_BODY"; run_sr GITHUB_ACTIONS=true; t "in Actions: token masked via ::add-mask::, and nowhere else" '[ "$(printf "%s\n" "$OUT$ERR" | grep -c "$SENTINEL")" = 1 ] && grep -qx "::add-mask::$SENTINEL" <<<"$OUT"'
 t "script never enables xtrace or echoes the token variable" '! grep -nE "set -[a-z]*x|echo[^|]*\\\$TOKEN|printf[^|]*\\\$TOKEN" "$SR" | grep -v "add-mask\|Authorization\|set +x"'
+
+section "workflow plumbing (static)"
+WF="$ROOT/.github/workflows/select-runner.yml"
+t "workflow reads vars.RUNNER_MODE with explicit mode input override, default hosted" 'grep -q "MODE: \${{ inputs.mode || vars.RUNNER_MODE || .hosted. }}" "$WF"'
+t "workflow exposes inputs mode/os/labels and outputs macos/linux/mode" 'for k in mode os labels; do grep -q "^      $k:" "$WF" || exit 1; done; for k in macos linux mode selfhosted reason runs-on; do grep -q "^      $k:" "$WF" || exit 1; done'
+t "os input defaults to macos; labels and mode default empty" 'awk "/^      os:/{f=1} f&&/default:/{print \$2; exit}" "$WF" | grep -qx macos'
+t "fallback input default is ubuntu-latest" 'awk "/^      fallback:/{f=1} f&&/default:/{print \$2; exit}" "$WF" | grep -qx ubuntu-latest'
+t "callers in this repo pass mode from vars, no secret needed" 'grep -q "mode: \${{ vars.RUNNER_MODE }}" "$ROOT/.github/workflows/ci.yml" "$ROOT/templates/ci-caller.yml"'
 
 section "static"
 if command -v shellcheck >/dev/null 2>&1; then t "shellcheck: select-runner + tests + fake curl" 'shellcheck -x "$SR" "$HERE/test_select_runner.sh" "$HERE/fixtures/curl"'; else ok "shellcheck not installed: skipped"; fi

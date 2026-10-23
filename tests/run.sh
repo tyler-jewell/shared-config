@@ -50,7 +50,7 @@ t "workflows declare permissions" 'for f in "$ROOT"/.github/workflows/*.yml; do 
 t "reusable workflows use workflow_call" 'for f in pr-title branch-name secrets-scan dco wrangler-warning agent-dx select-runner; do grep -q workflow_call "$ROOT/.github/workflows/$f.yml" || exit 1; done'
 t "bin/repo-policy is bash 3.2 syntax-clean" 'bash -n "$RP"'
 if command -v actionlint >/dev/null; then t "actionlint" '(cd "$ROOT" && actionlint)'; else ok "actionlint not installed: skipped"; fi
-if command -v shellcheck >/dev/null; then t "shellcheck" 'shellcheck -x "$RP" "$HERE/run.sh" "$HERE/fixtures/gh" "$ROOT/scripts/select-runner.sh"'; else ok "shellcheck not installed: skipped"; fi
+if command -v shellcheck >/dev/null; then t "shellcheck" 'shellcheck -x "$RP" "$HERE/run.sh" "$HERE/fixtures/gh" "$ROOT/scripts/select-runner.sh" "$ROOT/bin/runner-mode"'; else ok "shellcheck not installed: skipped"; fi
 if python3 -c 'import yaml' 2>/dev/null; then
   t "workflows parse as YAML" 'python3 -I -c "import sys,yaml;[yaml.safe_load(open(f)) for f in sys.argv[1:]]" "$ROOT"/.github/workflows/*.yml "$ROOT"/templates/ci-caller.yml'
 else ok "PyYAML not installed: YAML parse skipped"; fi
@@ -165,6 +165,8 @@ rp apply --all-active --dry-run --json; t "--all-active --dry-run read-only" '[ 
 
 section "select-runner (separate suite)"
 if bash "$HERE/test_select_runner.sh"; then ok "select-runner suite"; else bad "select-runner suite"; fi
+
+if bash "$HERE/test_runner_mode.sh"; then ok "runner-mode suite"; else bad "runner-mode suite"; fi
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

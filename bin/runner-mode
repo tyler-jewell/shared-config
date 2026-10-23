@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# runner-mode: flip the repository variable RUNNER_MODE (hosted|studio|auto) that the shared
+# select-runner workflow reads. The kill switch for the self-hosted Mac Studio: `set hosted`.
+# Needs gh (authenticated) and jq. Variables are not secrets; the value may appear on argv.
+set -u
+VERSION="1.0.0"
+PROG="runner-mode"
+GH="${GH:-gh}"
+VAR=RUNNER_MODE
+OWNER="${RUNNER_MODE_OWNER:-tyler-jewell}"
+CONFIG_DIR="${REPO_POLICY_CONFIG_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/config}"
+
+usage() {
+  cat <<'USAGE'
+Usage: runner-mode set <hosted|studio|auto> <owner/repo> | --all-active [--dry-run] [--json]
+       runner-mode get <owner/repo> | --all-active [--json]
+       runner-mode list --all-active [--json]          (same as: get --all-active)
+       runner-mode --help | --version
+
+Sets or reads the repo variable RUNNER_MODE used by select-runner.yml:
+  hosted  always GitHub-hosted ubuntu-latest (default when the variable is unset)
+  studio  trusted events use the self-hosted Mac Studio, no API call (jobs QUEUE if it is down)
+  auto    ask the API for an online/idle runner (needs the optional RUNNER_STATUS_TOKEN secret)
+Fork PRs and untrusted events are always hosted, in every mode.
+
+Options:
+  --dry-run     show what would change, write nothing
+  --json        structured output (schema runner-mode/v1) on stdout
+  --owner OWNER allowed owner (default tyler-jewell); Flag-Seeker is refused regardless
+  --all-active  every non-archived repo of OWNER, minus config/skip.txt and Flag-Seeker
+
+Exit codes: 0 ok; 3 gh/API error for at least one repo; 4 refused (Flag-Seeker or wrong owner);
+            64 usage error. Precedence when mixed: 3, then 4.
+Never prompts. Env: GH (gh binary), REPO_POLICY_CONFIG_DIR.
+USAGE
+}
+
+JSON=0; DRY=0; ALL=0; CMD=""; VALUE=""; TARGET=""
+die_usage() { echo "$PROG: $1" >&2; echo "try: $PROG --help" >&2; exit 64; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --help | -h) usage; exit 0 ;;
+    --version) echo "$PROG $VERSION"; exit 0 ;;
+    --json) JSON=1 ;;
+    --dry-run) DRY=1 ;;
+    --all-active) ALL=1 ;;
+    --owner) [ $# -ge 2 ] || die_usage "--owner needs a value"; OWNER="$2"; shift ;;
+    --owner=*) OWNER="${1#*=}" ;;
+    -*) die_usage "unknown flag: $1" ;;
+    *)
+      if [ -z "$CMD" ]; then CMD="$1"
+      elif [ "$CMD" = set ] && [ -z "$VALUE" ]; then VALUE="$1"
+      elif [ -z "$TARGET" ]; then TARGET="$1"
+      else die_usage "unexpected argument: $1"; fi ;;
+  esac
+  shift
+done
+case "$CMD" in
+  set) case "$VALUE" in hosted | studio | auto) ;; *) die_usage "set needs a mode: hosted, studio or auto" ;; esac ;;
+  get) ;;
+  list) ALL=1 ;;
+  "") die_usage "missing command (set|get|list)" ;;
+  *) die_usage "unknown command: $CMD" ;;
+esac
+[ "$CMD" = list ] && [ -n "$TARGET" ] && die_usage "list takes only --all-active"
+if [ -n "$TARGET" ] && [ "$ALL" = 1 ]; then die_usage "give either <owner/repo> or --all-active, not both"; fi
+if [ -z "$TARGET" ] && [ "$ALL" = 0 ]; then die_usage "missing target: <owner/repo> or --all-active"; fi
+if [ -n "$TARGET" ]; then
+  printf '%s' "$TARGET" | grep -Eq '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$' || die_usage "target must look like owner/repo"
+fi
+command -v jq >/dev/null 2>&1 || { echo "$PROG: jq is required" >&2; exit 3; }
+command -v "$GH" >/dev/null 2>&1 || { echo "$PROG: gh is required" >&2; exit 3; }
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/runner-mode.XXXXXX") || exit 3
+trap 'rm -rf "$TMP"' EXIT
+
+lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+RESULTS="$TMP/results.jsonl"; : > "$RESULTS"
+ERRS=0; REFUSED=0
+# add <repo> <status> <before> <after> <message>
+add() {
+  jq -nc --arg repo "$1" --arg status "$2" --arg before "$3" --arg after "$4" --arg message "$5" \
+    '{repo:$repo,status:$status,before:(if $before=="" then null else $before end),after:(if $after=="" then null else $after end),message:(if $message=="" then null else $message end)}' >> "$RESULTS"
+  [ "$JSON" = 1 ] || printf '%-8s %-40s %s%s\n' "$2" "$1" "${3:+$3}${4:+ -> $4}" "${5:+  ($5)}"
+}
+
+# current <repo>: sets CUR to the value, "unset", or "" on error (message in CURERR)
+current() {
+  local out
+  if out=$("$GH" variable get "$VAR" -R "$1" 2>"$TMP/err"); then CUR=$(printf '%s' "$out" | tr -d '\r\n'); CURERR=""
+  elif grep -qiE '404|not found' "$TMP/err"; then CUR="unset"; CURERR=""
+  else CUR=""; CURERR=$(head -n 1 "$TMP/err"); fi
+}
+
+do_repo() { # do_repo <owner/repo> <explicit 0|1>
+  local full="$1" explicit="$2" owner name
+  owner="${full%%/*}"; name="${full#*/}"
+  case "$(lc "$owner")/$(lc "$name")" in
+    flag-seeker/* | */flagseeker | */flag-seeker)
+      if [ "$explicit" = 1 ]; then add "$full" refused "" "" "Flag-Seeker is never touched"; REFUSED=1; else add "$full" skipped "" "" "exempt: Flag-Seeker"; fi
+      return ;;
+  esac
+  if [ "$(lc "$owner")" != "$(lc "$OWNER")" ]; then
+    if [ "$explicit" = 1 ]; then add "$full" refused "" "" "owner '$owner' is not '$OWNER' (override with --owner)"; REFUSED=1; else add "$full" skipped "" "" "owner not $OWNER"; fi
+    return
+  fi
+  if [ "$explicit" = 0 ] && [ -f "$CONFIG_DIR/skip.txt" ] && grep -qxi "$full" "$CONFIG_DIR/skip.txt"; then add "$full" skipped "" "" "in config/skip.txt"; return; fi
+  current "$full"
+  if [ -z "$CUR" ]; then add "$full" error "" "" "$CURERR"; ERRS=1; return; fi
+  if [ "$CMD" != set ]; then add "$full" ok "$CUR" "" ""; return; fi
+  if [ "$CUR" = "$VALUE" ]; then add "$full" unchanged "$CUR" "$VALUE" ""; return; fi
+  if [ "$DRY" = 1 ]; then add "$full" would-change "$CUR" "$VALUE" "dry-run"; return; fi
+  if "$GH" variable set "$VAR" --body "$VALUE" -R "$full" >/dev/null 2>"$TMP/err"; then add "$full" changed "$CUR" "$VALUE" ""
+  else add "$full" error "$CUR" "" "$(head -n 1 "$TMP/err")"; ERRS=1; fi
+}
+
+if [ "$ALL" = 1 ]; then
+  if ! out=$("$GH" api -X GET --paginate 'user/repos?affiliation=owner&per_page=100' 2>"$TMP/err"); then
+    echo "$PROG: cannot list repos: $(head -n 1 "$TMP/err")" >&2; exit 3
+  fi
+  list=$(printf '%s' "$out" | jq -rs --arg o "$OWNER" 'add // [] | map(select(.owner.login==$o and (.archived|not))) | sort_by(.full_name)[] | .full_name') || { echo "$PROG: bad repo list" >&2; exit 3; }
+  for r in $list; do do_repo "$r" 0; done
+else
+  do_repo "$TARGET" 1
+fi
+
+RC=0; [ "$REFUSED" = 1 ] && RC=4; [ "$ERRS" = 1 ] && RC=3
+if [ "$JSON" = 1 ]; then
+  jq -sc --arg cmd "$CMD" --arg value "$VALUE" --argjson dry "$([ "$DRY" = 1 ] && echo true || echo false)" --argjson rc "$RC" \
+    '{schema:"runner-mode/v1",command:$cmd,value:(if $value=="" then null else $value end),dry_run:$dry,exit_code:$rc,repos:.}' "$RESULTS"
+fi
+exit "$RC"
