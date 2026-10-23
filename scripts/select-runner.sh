@@ -4,12 +4,18 @@
 # the picker: every decision exits 0 and every error degrades to the fallback.
 #
 # Inputs (environment only; secrets are never taken from flags):
-#   GH_TOKEN      fine-grained PAT with Administration: read (may be empty => fallback)
+#   MODE          studio | hosted | auto (default hosted; unset/empty = hosted)
+#                   studio: trusted events go to the self-hosted labels, no API call, no token
+#                   hosted: always the fallback
+#                   auto:   ask the REST API whether a matching runner is online/idle (needs GH_TOKEN)
+#   OS_TARGET     macos (default) | linux: which label set `runs-on`/`reason`/`selfhosted` describe
+#   GH_TOKEN      (auto mode only) fine-grained PAT with Administration: read; empty => fallback
 #   REPO          owner/repo (required)
 #   EVENT_NAME    github.event_name (required)
 #   HEAD_REPO     PR head repo full name (pull_request events; empty => treated as fork)
-#   LABELS        comma list of required runner labels (default: mac-studio)
-#   FALLBACK      runs-on when not self-hosted (default: ubuntu-latest)
+#   LABELS        comma list overriding the labels of OS_TARGET (default: macos => mac-studio,
+#                 linux => mac-studio-linux); the other OS keeps its default
+#   FALLBACK      runs-on when not self-hosted (default: ubuntu-latest; the fallback is Linux)
 #   PREFER_QUEUE  true => self-hosted even when every matching runner is busy (default: false)
 #   TIMEOUT       per API call, seconds, "10" or "10s" (default: 10)
 #   RETRIES       max attempts per API call (default: 3), exponential backoff with jitter
@@ -17,11 +23,13 @@
 #   TRUSTED_EVENTS space list (default: push workflow_dispatch schedule merge_group pull_request)
 #   MAX_WAIT      cap in seconds on a single Retry-After wait (default: 30)
 #   GITHUB_OUTPUT / GITHUB_STEP_SUMMARY: written when set.
+# Outputs: runs-on/reason/selfhosted for OS_TARGET, plus macos and linux (runs-on JSON for each
+# OS, for matrices) and mode. Untrusted events and fork PRs ALWAYS get the fallback, in every mode.
 # Exit codes: 0 decision made (including every fallback); 64 invalid usage/env (fallback is
 # still written to $GITHUB_OUTPUT so pipelines keep working).
 set +x
 set -u
-VERSION="1.0.0"
+VERSION="1.1.0"
 PROG="select-runner"
 JSON_ONLY=0
 
@@ -55,7 +63,9 @@ unset GH_TOKEN
 REPO="${REPO:-}"
 EVENT_NAME="${EVENT_NAME:-}"
 HEAD_REPO="${HEAD_REPO:-}"
-LABELS="${LABELS:-mac-studio}"
+LABELS="${LABELS:-}"
+MODE="${MODE:-hosted}"
+OS_TARGET="${OS_TARGET:-macos}"
 FALLBACK="${FALLBACK:-ubuntu-latest}"
 PREFER_QUEUE="${PREFER_QUEUE:-false}"
 TIMEOUT="${TIMEOUT:-10}"
@@ -66,10 +76,12 @@ MAX_WAIT="${MAX_WAIT:-30}"
 SLEEP="${SELECT_RUNNER_SLEEP:-sleep}"
 TIMEOUT="${TIMEOUT%s}"
 
-SELFHOSTED=false
-REASON=""
-RUNS_ON_SELF="[]"
-ONLINE=0; IDLE=0; BUSY=0
+# Per-OS decision state (macos, linux). OS_TARGET's values are what the single-value outputs report.
+SH_macos=false; SH_linux=false
+RS_macos=""; RS_linux=""
+RO_macos="[]"; RO_linux="[]"
+ON_macos=0; ON_linux=0; ID_macos=0; ID_linux=0; BU_macos=0; BU_linux=0
+SELFHOSTED=false; REASON=""; ONLINE=0; IDLE=0; BUSY=0
 LAST_ERR=""
 
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
@@ -88,13 +100,23 @@ fallback_json() {
 }
 
 finish() { # finish <exit-code>
-  local rc="$1" runs_on sh_json
-  if [ "$SELFHOSTED" = true ]; then runs_on="$RUNS_ON_SELF"; else runs_on=$(fallback_json); fi
+  local rc="$1" runs_on sh_json fb ro_macos ro_linux
+  fb=$(fallback_json)
+  if [ "$SH_macos" = true ]; then ro_macos="$RO_macos"; else ro_macos="$fb"; fi
+  if [ "$SH_linux" = true ]; then ro_linux="$RO_linux"; else ro_linux="$fb"; fi
+  if [ "$OS_TARGET" = linux ]; then
+    SELFHOSTED=$SH_linux; REASON=$RS_linux; runs_on=$ro_linux; ONLINE=$ON_linux; IDLE=$ID_linux; BUSY=$BU_linux
+  else
+    SELFHOSTED=$SH_macos; REASON=$RS_macos; runs_on=$ro_macos; ONLINE=$ON_macos; IDLE=$ID_macos; BUSY=$BU_macos
+  fi
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
     {
       printf 'runs-on=%s\n' "$runs_on"
       printf 'reason=%s\n' "$REASON"
       printf 'selfhosted=%s\n' "$SELFHOSTED"
+      printf 'macos=%s\n' "$ro_macos"
+      printf 'linux=%s\n' "$ro_linux"
+      printf 'mode=%s\n' "${MODE_OUT:-$MODE}"
     } >> "$GITHUB_OUTPUT"
   fi
   if [ "$SELFHOSTED" = true ]; then sh_json=true; else sh_json=false; fi
@@ -102,9 +124,10 @@ finish() { # finish <exit-code>
   local summary
   if command -v jq >/dev/null 2>&1; then
     summary=$(jq -nc --arg reason "$REASON" --arg event "$EVENT_NAME" --arg repo "$REPO" \
-      --argjson runs_on "$runs_on" --argjson sh "$sh_json" \
+      --argjson runs_on "$runs_on" --argjson sh "$sh_json" --arg mode "${MODE_OUT:-$MODE}" --arg os "$OS_TARGET" \
+      --argjson macos "$ro_macos" --argjson linux "$ro_linux" \
       --argjson online "$ONLINE" --argjson idle "$IDLE" --argjson busy "$BUSY" --argjson rc "$rc" \
-      '{schema:"select-runner/v1",selfhosted:$sh,runs_on:$runs_on,reason:$reason,event:$event,repo:$repo,online:$online,idle:$idle,busy:$busy,exit_code:$rc}')
+      '{schema:"select-runner/v1",mode:$mode,os:$os,selfhosted:$sh,runs_on:$runs_on,macos:$macos,linux:$linux,reason:$reason,event:$event,repo:$repo,online:$online,idle:$idle,busy:$busy,exit_code:$rc}')
   else
     summary="{\"schema\":\"select-runner/v1\",\"selfhosted\":$sh_json,\"runs_on\":$runs_on,\"reason\":\"$REASON\",\"exit_code\":$rc}"
   fi
@@ -122,7 +145,8 @@ finish() { # finish <exit-code>
   exit "$rc"
 }
 
-fallback() { SELFHOSTED=false; REASON="$1"; finish "${2:-0}"; }
+# fallback <reason> [exit]: both OS targets go to the fallback.
+fallback() { SH_macos=false; SH_linux=false; RS_macos="$1"; RS_linux="$1"; finish "${2:-0}"; }
 
 # ---- validation (64) -------------------------------------------------------
 [ "${BAD_ARG:-0}" = 1 ] && fallback usage 64
@@ -140,9 +164,23 @@ case "$MAX_WAIT" in "" | *[!0-9]*) echo "$PROG: MAX_WAIT must be an integer" >&2
 case "$(lower "$PREFER_QUEUE")" in true | false) ;; *) echo "$PROG: PREFER_QUEUE must be true or false" >&2; fallback invalid-prefer-queue 64 ;; esac
 PREFER_QUEUE=$(lower "$PREFER_QUEUE")
 command -v jq >/dev/null 2>&1 || { echo "$PROG: jq is required" >&2; fallback no-jq 0; }
-REQ=$(printf '%s' "$LABELS" | jq -Rsc 'split(",")|map(gsub("^\\s+|\\s+$";"")|ascii_downcase|select(length>0))|unique')
-[ "$REQ" != "[]" ] || { echo "$PROG: LABELS must not be empty" >&2; fallback invalid-labels 64; }
-RUNS_ON_SELF=$(printf '%s' "$LABELS" | jq -Rsc 'split(",")|map(gsub("^\\s+|\\s+$";"")|select(length>0))|map(select(ascii_downcase!="self-hosted"))|["self-hosted"]+.')
+MODE=$(lower "$MODE"); OS_TARGET=$(lower "$OS_TARGET")
+case "$MODE" in studio | hosted | auto) ;; *) echo "$PROG: MODE must be studio, hosted or auto" >&2; fallback invalid-mode 64 ;; esac
+case "$OS_TARGET" in macos | linux) ;; *) echo "$PROG: OS_TARGET must be macos or linux" >&2; fallback invalid-os 64 ;; esac
+if [ -n "$LABELS" ] && [ "$(printf '%s' "$LABELS" | jq -Rsc 'split(",")|map(gsub("^\\s+|\\s+$";"")|select(length>0))|length')" = 0 ]; then
+  echo "$PROG: LABELS must not be only separators" >&2; fallback invalid-labels 64
+fi
+# labels_for <os>: comma list for that OS (LABELS overrides only OS_TARGET)
+labels_for() {
+  if [ "$1" = "$OS_TARGET" ] && [ -n "$LABELS" ]; then printf '%s' "$LABELS"
+  elif [ "$1" = linux ]; then printf 'mac-studio-linux'
+  else printf 'mac-studio'; fi
+}
+for os in macos linux; do
+  L=$(labels_for "$os")
+  ro=$(printf '%s' "$L" | jq -Rsc 'split(",")|map(gsub("^\\s+|\\s+$";"")|select(length>0))|map(select(ascii_downcase!="self-hosted"))|["self-hosted"]+.')
+  if [ "$os" = macos ]; then RO_macos="$ro"; else RO_linux="$ro"; fi
+done
 
 # ---- (a) event trust -------------------------------------------------------
 trusted=0
@@ -154,7 +192,13 @@ if [ "$EVENT_NAME" = pull_request ]; then
   fi
 fi
 
-# ---- (b) token -------------------------------------------------------------
+# ---- (b) mode (token-free switch) ------------------------------------------
+case "$MODE" in
+  hosted) fallback mode-hosted ;;
+  studio) SH_macos=true; SH_linux=true; RS_macos=mode-studio; RS_linux=mode-studio; finish 0 ;;
+esac
+
+# ---- (c0) auto mode needs the token ------------------------------------------
 [ -n "$TOKEN" ] || fallback no-token
 
 # ---- (c) API with retries --------------------------------------------------
@@ -209,14 +253,20 @@ while [ "$page" -le 20 ]; do
   page=$((page + 1))
 done
 
-# ---- (d) selection ---------------------------------------------------------
-STATS=$(jq -c --argjson req "$REQ" '
-  [ .[] | select(type=="object" and .status=="online")
-        | select(((.labels // []) | map((.name // "") | ascii_downcase)) as $l | all($req[]; . as $r | $l | index($r) != null)) ]
-  | {online: length, idle: (map(select(.busy != true)) | length), busy: (map(select(.busy == true)) | length)}' <<<"$ALL") || fallback bad-json
-ONLINE=$(jq '.online' <<<"$STATS"); IDLE=$(jq '.idle' <<<"$STATS"); BUSY=$(jq '.busy' <<<"$STATS")
-
-if [ "$ONLINE" -eq 0 ]; then fallback no-runner-online; fi
-if [ "$IDLE" -gt 0 ]; then SELFHOSTED=true; REASON=idle-runner; finish 0; fi
-if [ "$PREFER_QUEUE" = true ]; then SELFHOSTED=true; REASON=queue; finish 0; fi
-fallback all-busy
+# ---- (d) selection (auto mode), evaluated for both OS label sets ---------------
+for os in macos linux; do
+  REQ=$(labels_for "$os" | jq -Rsc 'split(",")|map(gsub("^\\s+|\\s+$";"")|ascii_downcase|select(length>0))|unique')
+  STATS=$(jq -c --argjson req "$REQ" '
+    [ .[] | select(type=="object" and .status=="online")
+          | select(((.labels // []) | map((.name // "") | ascii_downcase)) as $l | all($req[]; . as $r | $l | index($r) != null)) ]
+    | {online: length, idle: (map(select(.busy != true)) | length), busy: (map(select(.busy == true)) | length)}' <<<"$ALL") || fallback bad-json
+  on=$(jq '.online' <<<"$STATS"); id=$(jq '.idle' <<<"$STATS"); bu=$(jq '.busy' <<<"$STATS")
+  sh=false
+  if [ "$on" -eq 0 ]; then r=no-runner-online
+  elif [ "$id" -gt 0 ]; then sh=true; r=idle-runner
+  elif [ "$PREFER_QUEUE" = true ]; then sh=true; r=queue
+  else r=all-busy; fi
+  if [ "$os" = macos ]; then SH_macos=$sh; RS_macos=$r; ON_macos=$on; ID_macos=$id; BU_macos=$bu
+  else SH_linux=$sh; RS_linux=$r; ON_linux=$on; ID_linux=$id; BU_linux=$bu; fi
+done
+finish 0

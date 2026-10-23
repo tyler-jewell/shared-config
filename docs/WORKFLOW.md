@@ -46,4 +46,4 @@ Copy `templates/*` (or rely on the `tyler-jewell/.github` community-health repo)
 
 ## Runners
 
-CI prefers the self-hosted Mac Studio runner and falls back to `ubuntu-latest` through the `pick` job (`select-runner.yml`). Fork PRs and untrusted events never reach the Studio. Setup, security model and troubleshooting: [RUNNERS](RUNNERS.md). Needs the repo secret `RUNNER_STATUS_TOKEN`.
+CI runs on `ubuntu-latest` by default. The repo variable `RUNNER_MODE` (`hosted` default, `studio`, `auto`) read by the `pick` job (`select-runner.yml`) can send trusted same-repo events to the self-hosted Mac Studio; fork PRs and untrusted events never reach it. No secret needed. Flip with `bin/runner-mode set hosted|studio <repo>`. Details, kill switch and troubleshooting: [RUNNERS](RUNNERS.md).

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Fake gh for bin/runner-mode tests. State dir: $FAKE_RM_DIR. Logs "<args>" to calls.log.
+# Files: repos.json (user/repos list), <o>__<r>.var (current RUNNER_MODE), <o>__<r>.geterr, <o>__<r>.seterr
+set -u
+d="$FAKE_RM_DIR"; echo "$*" >> "$d/calls.log"
+repo=""; body=""; prev=""
+for a in "$@"; do
+  [ "$prev" = -R ] && repo="$a"; [ "$prev" = --body ] && body="$a"; prev="$a"
+done
+key=$(printf '%s' "$repo" | tr / _ | sed 's/_/__/')
+case "$1 $2" in
+  "variable get")
+    [ -e "$d/$key.geterr" ] && { echo "HTTP 500: Server Error" >&2; exit 1; }
+    [ -e "$d/$key.var" ] || { echo "HTTP 404: Not Found" >&2; exit 1; }
+    cat "$d/$key.var" ;;
+  "variable set")
+    [ -e "$d/$key.seterr" ] && { echo "HTTP 403: forbidden" >&2; exit 1; }
+    printf '%s\n' "$body" > "$d/$key.var"; echo "set" ;;
+  "api -X") cat "$d/repos.json" ;;
+  *) echo "fake gh: unsupported: $*" >&2; exit 1 ;;
+esac

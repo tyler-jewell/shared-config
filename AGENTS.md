@@ -51,7 +51,7 @@ Precedence when mixed: 3, then 4, then 2.
 
 ## `scripts/select-runner.sh` (runner picker)
 
-Env-only inputs (never flags for secrets): `GH_TOKEN REPO EVENT_NAME HEAD_REPO LABELS FALLBACK PREFER_QUEUE TIMEOUT RETRIES API_URL`. Flags: `--json --help --version`. No prompts.
+Env-only inputs (never flags for secrets): `MODE` (studio|hosted|auto, default hosted) `OS_TARGET` (macos|linux) `GH_TOKEN` (auto only) REPO EVENT_NAME HEAD_REPO LABELS FALLBACK PREFER_QUEUE TIMEOUT RETRIES API_URL`. Flags: `--json --help --version`. No prompts.
 
 | Code | Meaning |
 |---|---|
@@ -59,3 +59,7 @@ Env-only inputs (never flags for secrets): `GH_TOKEN REPO EVENT_NAME HEAD_REPO L
 | 64 | invalid usage/env (fallback is still written to `$GITHUB_OUTPUT`) |
 
 Stdout: a human line, then one JSON line `{"schema":"select-runner/v1","selfhosted":bool,"runs_on":...,"reason":"slug","event","repo","online","idle","busy","exit_code"}`. `$GITHUB_OUTPUT` gets `runs-on=<json>`, `reason=`, `selfhosted=`. Reasons: see [docs/RUNNERS.md](docs/RUNNERS.md). The token is never printed. Tests: `bash tests/test_select_runner.sh`.
+
+## `bin/runner-mode` (kill switch)
+
+`bin/runner-mode set <hosted|studio|auto> <owner/repo>|--all-active [--dry-run] [--json]`, `get|list`. Wraps `gh variable set RUNNER_MODE`. Exit codes: 0 ok, 3 gh/API error, 4 refused (Flag-Seeker or wrong owner), 64 usage. JSON schema `runner-mode/v1`: `{schema,command,value,dry_run,exit_code,repos:[{repo,status:ok|changed|unchanged|would-change|skipped|refused|error,before,after,message}]}`. Never prompts.

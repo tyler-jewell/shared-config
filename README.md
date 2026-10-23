@@ -3,7 +3,7 @@
 One strict, common way of working for all of Tyler's repos, enforced server-side where GitHub allows it.
 
 - `rulesets/` GitHub ruleset definitions (default branch protection; opt-in required checks and signed commits)
-- `scripts/select-runner.sh` runner picker used by `select-runner.yml`
+- `scripts/select-runner.sh` runner picker used by `select-runner.yml`; `bin/runner-mode` flips the `RUNNER_MODE` repo variable (hosted/studio/auto)
 - `bin/repo-policy` applies/checks rulesets and repo settings across repos (bash + gh + jq)
 - `.github/workflows/` reusable workflows: pr-title, branch-name, secrets-scan, dco, wrangler-warning, agent-dx (placeholder), select-runner (prefers the self-hosted Mac Studio, falls back to ubuntu-latest)
 - `templates/` PR/issue templates, CONTRIBUTING, SECURITY, CODEOWNERS, dependabot, release-please, caller workflow
