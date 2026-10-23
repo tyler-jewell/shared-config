@@ -1,0 +1,56 @@
+# Copy to .github/workflows/ci.yml in a repo. Calls the shared reusable workflows.
+# Gate jobs `ci` and `pr-title` are plain jobs so the required-status-check contexts are exactly
+# `ci` and `pr-title` (a reusable-workflow job would report as "<job> / <inner job>").
+# Add your own build/test jobs to the `needs:` of the `ci` gate.
+name: ci
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  title-lint:
+    if: github.event_name == 'pull_request'
+    uses: tyler-jewell/shared-config/.github/workflows/pr-title.yml@v1
+  branch-name:
+    if: github.event_name == 'pull_request'
+    uses: tyler-jewell/shared-config/.github/workflows/branch-name.yml@v1
+  secrets-scan:
+    uses: tyler-jewell/shared-config/.github/workflows/secrets-scan.yml@v1
+    permissions:
+      contents: read
+  dco:
+    if: github.event_name == 'pull_request'
+    uses: tyler-jewell/shared-config/.github/workflows/dco.yml@v1
+    permissions:
+      contents: read
+  wrangler-warning:
+    uses: tyler-jewell/shared-config/.github/workflows/wrangler-warning.yml@v1
+    permissions:
+      contents: read
+  agent-dx:
+    uses: tyler-jewell/shared-config/.github/workflows/agent-dx.yml@v1
+    permissions:
+      contents: read
+
+  pr-title:
+    if: always()
+    needs: [title-lint]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - env:
+          R: ${{ needs.title-lint.result }}
+        run: '[ "$R" = success ] || [ "$R" = skipped ]'
+  ci:
+    if: always()
+    needs: [branch-name, secrets-scan, dco, wrangler-warning, agent-dx]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for r in $RESULTS; do [ "$r" = success ] || [ "$r" = skipped ] || { echo "failed: $RESULTS"; exit 1; }; done
