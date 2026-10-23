@@ -179,6 +179,7 @@ desired_settings() { # $1 private(true/false)
     + (if $priv then {} else {web_commit_signoff_required:true} end)'
 }
 
+# shellcheck disable=SC2016  # jq program: $-expressions are for jq, not bash
 JQ_NORM='
 def norm: {enforcement, target,
   include: (.conditions.ref_name.include // [] | sort),
@@ -216,7 +217,7 @@ skip_repo() { # repo status reason
 }
 
 check_settings() { # full repojson
-  local full="$1" rj="$2" priv want live drift keys body
+  local full="$1" rj="$2" priv want live drift body
   priv=$(jq -r '.private' <<<"$rj")
   want=$(desired_settings "$priv")
   live=$(jq -c --argjson w "$want" '. as $r | $w | with_entries(.value = $r[.key])' <<<"$rj")
@@ -245,7 +246,7 @@ check_toggle() { # area, GET path, PUT path, enabled-test (alerts|fixes), full
 }
 
 check_secret_scanning() { # full repojson
-  local full="$1" rj="$2" ss pp drift body="" areas=""
+  local full="$1" rj="$2" ss pp drift body=""
   if [ "$(jq -r '.security_and_analysis == null' <<<"$rj")" = true ]; then
     add_check secret_scanning unavailable none "[]" "security_and_analysis not exposed (private repo without GHAS, or no admin)" false
     add_check secret_push_protection unavailable none "[]" "security_and_analysis not exposed" false
@@ -282,7 +283,7 @@ check_secret_scanning() { # full repojson
 }
 
 check_ruleset() { # full with_checks signed
-  local full="$1" want name id live drift rid
+  local full="$1" want name id live drift
   want=$(build_ruleset "$2" "$3") || { add_check ruleset error none "[]" "cannot build desired ruleset" false; return; }
   name=$(jq -r '.name' <<<"$want")
   if ! gh_get "repos/$full/rulesets"; then

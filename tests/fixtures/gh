@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2012,SC2015  # fake gh: simple fixtures, A && B || C is intended
 # Fake gh for tests. State dir: $FAKE_GH_DIR. Logs every call to calls.log as "METHOD path".
 # Files: user.json, repos.json, <o>__<r>.repo.json, <o>__<r>.rulesets.json (or .rulesets.403),
 #        <o>__<r>.ruleset.<id>.json, <o>__<r>.vuln (present = enabled), <o>__<r>.fixes.json

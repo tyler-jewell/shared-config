@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016,SC2034,SC2012  # tests pass single-quoted snippets to eval; vars are used inside them
 # Test suite for shared-config. Usage: bash tests/run.sh
 set -u
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); ROOT=$(cd "$HERE/.." && pwd)
