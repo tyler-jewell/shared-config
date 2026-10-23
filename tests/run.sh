@@ -47,10 +47,10 @@ t "no branch-naming.json (branch_name_pattern is Enterprise-only)" '[ ! -e "$ROO
 section "static checks"
 t "all workflows pin third-party actions by sha" '! grep -hE "uses: [^./]" "$ROOT"/.github/workflows/*.yml | grep -vE "@[0-9a-f]{40}( |$)"'
 t "workflows declare permissions" 'for f in "$ROOT"/.github/workflows/*.yml; do grep -q "^permissions:" "$f" || exit 1; done'
-t "reusable workflows use workflow_call" 'for f in pr-title branch-name secrets-scan dco wrangler-warning agent-dx; do grep -q workflow_call "$ROOT/.github/workflows/$f.yml" || exit 1; done'
+t "reusable workflows use workflow_call" 'for f in pr-title branch-name secrets-scan dco wrangler-warning agent-dx select-runner; do grep -q workflow_call "$ROOT/.github/workflows/$f.yml" || exit 1; done'
 t "bin/repo-policy is bash 3.2 syntax-clean" 'bash -n "$RP"'
 if command -v actionlint >/dev/null; then t "actionlint" '(cd "$ROOT" && actionlint)'; else ok "actionlint not installed: skipped"; fi
-if command -v shellcheck >/dev/null; then t "shellcheck" 'shellcheck -x "$RP" "$HERE/run.sh" "$HERE/fixtures/gh"'; else ok "shellcheck not installed: skipped"; fi
+if command -v shellcheck >/dev/null; then t "shellcheck" 'shellcheck -x "$RP" "$HERE/run.sh" "$HERE/fixtures/gh" "$ROOT/scripts/select-runner.sh"'; else ok "shellcheck not installed: skipped"; fi
 if python3 -c 'import yaml' 2>/dev/null; then
   t "workflows parse as YAML" 'python3 -I -c "import sys,yaml;[yaml.safe_load(open(f)) for f in sys.argv[1:]]" "$ROOT"/.github/workflows/*.yml "$ROOT"/templates/ci-caller.yml'
 else ok "PyYAML not installed: YAML parse skipped"; fi
@@ -162,6 +162,9 @@ rp list --json; t "list: 2 active, rest skipped/archived" '[ $RC -eq 0 ] && jq -
 rp check --all-active --json
 t "--all-active: processes only a1,a2; skip.txt/exempt/archived skipped; Flag-Seeker never fetched" '[ $RC -eq 2 ] && jq -e "([.repos[]|select(.status==\"drift\").repo]|sort)==[\"tyler-jewell/a1\",\"tyler-jewell/a2\"]" <<<"$OUT" >/dev/null && ! grep -qi "flag-seeker\|flagseeker" "$S/calls.log" && ! grep -q skipme "$S/calls.log"'
 rp apply --all-active --dry-run --json; t "--all-active --dry-run read-only" '[ $RC -eq 2 ] && [ "$(nonget)" = 0 ] && [ "$(writes)" = 0 ]'
+
+section "select-runner (separate suite)"
+if bash "$HERE/test_select_runner.sh"; then ok "select-runner suite"; else bad "select-runner suite"; fi
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

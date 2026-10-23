@@ -2,6 +2,9 @@
 # Gate jobs `ci` and `pr-title` are plain jobs so the required-status-check contexts are exactly
 # `ci` and `pr-title` (a reusable-workflow job would report as "<job> / <inner job>").
 # Add your own build/test jobs to the `needs:` of the `ci` gate.
+# `pick` chooses runs-on for your jobs: the self-hosted `mac-studio` runner when it is online and idle
+# and the event is trusted (same-repo), else ubuntu-latest. See docs/RUNNERS.md. Needs the repo secret
+# RUNNER_STATUS_TOKEN (without it the picker simply falls back to ubuntu-latest).
 name: ci
 on:
   pull_request:
@@ -11,6 +14,12 @@ on:
 permissions:
   contents: read
 jobs:
+  pick:
+    uses: tyler-jewell/shared-config/.github/workflows/select-runner.yml@v1
+    permissions:
+      contents: read
+    secrets:
+      runner-status-token: ${{ secrets.RUNNER_STATUS_TOKEN }}
   title-lint:
     if: github.event_name == 'pull_request'
     uses: tyler-jewell/shared-config/.github/workflows/pr-title.yml@v1
@@ -35,6 +44,17 @@ jobs:
     permissions:
       contents: read
 
+  # Example: runs on the Studio when picked, else ubuntu-latest. For PUBLIC repos also keep an
+  # always-on hosted portability leg (see docs/RUNNERS.md). Add `build` and `pick` to the ci gate's needs.
+  # build:
+  #   needs: pick
+  #   runs-on: ${{ fromJSON(needs.pick.outputs.runs-on) }}
+  #   timeout-minutes: 15
+  #   permissions:
+  #     contents: read
+  #   steps:
+  #     - run: echo "building on ${{ runner.os }}"
+
   pr-title:
     if: always()
     needs: [title-lint]
@@ -46,7 +66,7 @@ jobs:
         run: '[ "$R" = success ] || [ "$R" = skipped ]'
   ci:
     if: always()
-    needs: [branch-name, secrets-scan, dco, wrangler-warning, agent-dx]
+    needs: [pick, branch-name, secrets-scan, dco, wrangler-warning, agent-dx]
     runs-on: ubuntu-latest
     permissions: {}
     steps:

@@ -1,0 +1,106 @@
+# Reusable "picker": decides `runs-on` for downstream jobs. Prefers a self-hosted runner (default
+# label `mac-studio`) when one is online and idle AND the event is trusted; otherwise falls back to
+# a GitHub-hosted label. GitHub has no automatic fallback (a job targeting self-hosted labels with
+# no online runner queues for up to 24h), so this small job runs on ubuntu-latest first.
+#
+# Caller pattern (see docs/RUNNERS.md):
+#   pick:
+#     (call) tyler-jewell/shared-config/.github/workflows/select-runner.yml@v1
+#     secrets:
+#       runner-status-token: ${{ secrets.RUNNER_STATUS_TOKEN }}
+#   build:
+#     needs: pick
+#     runs-on: ${{ fromJSON(needs.pick.outputs.runs-on) }}
+#
+# The picker never fails the pipeline: any problem (no token, API error, missing script) degrades
+# to the fallback label with a precise `reason` output.
+name: select-runner
+on:
+  workflow_call:
+    inputs:
+      labels:
+        description: Comma list of required runner labels (also appended to self-hosted in runs-on)
+        type: string
+        default: mac-studio
+      fallback:
+        description: runs-on when not self-hosted (string label, or a JSON array)
+        type: string
+        default: ubuntu-latest
+      prefer-queue:
+        description: Use the self-hosted runner even when every matching runner is busy
+        type: boolean
+        default: false
+    secrets:
+      runner-status-token:
+        description: Fine-grained PAT, repository permission Administration read. Optional; empty => fallback
+        required: false
+    outputs:
+      runs-on:
+        description: JSON value for runs-on, use with fromJSON()
+        value: ${{ jobs.pick.outputs.runs-on }}
+      reason:
+        description: Decision slug (see docs/RUNNERS.md)
+        value: ${{ jobs.pick.outputs.reason }}
+      selfhosted:
+        description: "'true' when the self-hosted runner was chosen"
+        value: ${{ jobs.pick.outputs.selfhosted }}
+permissions: {}
+jobs:
+  pick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    outputs:
+      runs-on: ${{ steps.pick.outputs.runs-on }}
+      reason: ${{ steps.pick.outputs.reason }}
+      selfhosted: ${{ steps.pick.outputs.selfhosted }}
+    steps:
+      # Fetch the script from the exact commit of THIS reusable workflow file. In a reusable
+      # workflow the `github` context is the caller's (github.workflow_sha is the caller's file);
+      # the documented `job.workflow_sha` is the commit of the file that defines this job (github.com
+      # only, not GHES). There is no documented `github.job_workflow_sha`. If `job.workflow_sha` is
+      # ever empty we fall back to the floating tag v1. The repository is hard-coded on purpose.
+      # continue-on-error: the run step degrades to the fallback if this fails.
+      - name: Fetch select-runner.sh
+        id: fetch
+        continue-on-error: true
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: tyler-jewell/shared-config
+          ref: ${{ job.workflow_sha || 'v1' }}
+          sparse-checkout: scripts
+          path: .select-runner-src
+          persist-credentials: false
+      - name: Pick runner
+        id: pick
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.runner-status-token }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          LABELS: ${{ inputs.labels }}
+          FALLBACK: ${{ inputs.fallback }}
+          PREFER_QUEUE: ${{ inputs.prefer-queue }}
+        run: |
+          set +x
+          script=.select-runner-src/scripts/select-runner.sh
+          rc=0
+          if [ -f "$script" ]; then
+            bash "$script" || rc=$?
+          else
+            rc=255
+          fi
+          if [ "$rc" -eq 64 ]; then
+            echo "::warning::select-runner reported invalid usage/env (exit 64); fallback was emitted"
+          elif [ "$rc" -ne 0 ]; then
+            echo "::warning::select-runner unavailable (exit $rc, fetch=${{ steps.fetch.outcome }}); using fallback"
+            f="${FALLBACK:-ubuntu-latest}"
+            case "$f" in "["*) j="$f" ;; *) j=$(printf '%s' "$f" | jq -Rsc .) ;; esac
+            {
+              echo "runs-on=$j"
+              echo "reason=picker-unavailable"
+              echo "selfhosted=false"
+            } >> "$GITHUB_OUTPUT"
+          fi
