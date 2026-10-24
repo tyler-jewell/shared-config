@@ -1,0 +1,38 @@
+name: pr-based-repo
+description: Branch protection for deployed repos (Cloudflare, Vercel, Netlify, etc.) that require PR review, CI, and DCO before merge.
+
+# Applied via: repo-policy apply --checks ruleset --yes <owner/repo>
+# Only for repos with deployed infrastructure (flagseeker, etc.)
+
+rules:
+  - type: pull_request
+    parameters:
+      required_approving_review_count: 1
+      dismiss_stale_reviews_on_push: true
+      require_code_owner_review: false
+      require_last_push_approval: false
+      required_review_thread_resolution: true
+
+  - type: required_status_checks
+    parameters:
+      strict_required_status_checks_policy: true
+      required_status_checks:
+        - context: ci
+        - context: pr-title
+
+  - type: non_fast_forward
+    parameters: {}
+
+  - type: deletion
+    parameters: {}
+
+  - type: required_signatures
+    parameters: {}
+
+  - type: linear_history
+    parameters: {}
+
+# Branch targeting
+target: refs/heads/main
+enforcement: active
+bypass_actors: []
